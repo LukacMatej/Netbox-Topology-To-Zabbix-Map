@@ -1,0 +1,26 @@
+[project]
+name = "zabbix-netbox-map-sync"
+version = "0.1.0"
+description = "Create or update Zabbix maps from NetBox topology views"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "flask>=3.0.0",
+  "requests>=2.31.0"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0.0"
+]
+
+[project.scripts]
+zbx-map-sync = "zabbix_map_sync.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zabbix_map_sync*"]

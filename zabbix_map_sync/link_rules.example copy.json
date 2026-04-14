@@ -1,0 +1,10 @@
+[
+  {
+    "host_a": "Switch 1",
+    "host_b": "Switch 2",
+    "trigger_name": "ICMP Ping: Unavailable by ICMP ping",
+    "color": "FF0000",
+    "drawtype": 0,
+    "match": "exact"
+  }
+]

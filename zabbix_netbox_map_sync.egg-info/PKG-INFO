@@ -1,0 +1,73 @@
+Metadata-Version: 2.4
+Name: zabbix-netbox-map-sync
+Version: 0.1.0
+Summary: Create or update Zabbix maps from NetBox topology views
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31.0
+
+# Zabbix map sync from NetBox topology
+
+Small Python CLI app that reads topology data from NetBox (including topology-views plugin endpoints) and creates/updates a Zabbix map.
+
+## What it does
+
+- Fetches a topology graph from NetBox (`nodes` + `edges` style payload)
+- Resolves NetBox node labels against Zabbix host names
+- Creates or updates one Zabbix map with host elements and links
+- Uses a simple circular layout
+
+## Requirements
+
+- Python 3.10+
+- API token for NetBox
+- Zabbix API credentials
+
+## Setup
+
+```bash
+cd /home/mates/Python/zabbix_maps
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Configuration
+
+Copy `.env.example` values into your shell environment (or a `.env` loader you already use).
+
+Required variables:
+
+- `NETBOX_URL`
+- `NETBOX_TOKEN`
+- `ZABBIX_URL`
+- `ZABBIX_USER`
+- `ZABBIX_PASSWORD`
+
+Optional variables:
+
+- `NETBOX_TOPOLOGY_PATH` (default `/api/plugins/topology-views/topology/`)
+- `NETBOX_TOPOLOGY_QUERY` (example: `site_id=1`)
+- `ZABBIX_MAP_NAME` (default `NetBox Topology`)
+- `ZABBIX_MAP_WIDTH` (default `1280`)
+- `ZABBIX_MAP_HEIGHT` (default `900`)
+
+## Run
+
+Dry-run:
+
+```bash
+zbx-map-sync --dry-run
+```
+
+Apply changes:
+
+```bash
+zbx-map-sync
+```
+
+## Notes
+
+- Node label in NetBox is matched to Zabbix host `host` or `name`.
+- Nodes that do not match a Zabbix host are skipped.
+- If your topology endpoint shape differs, adjust parsing in `zabbix_map_sync/netbox.py`.
