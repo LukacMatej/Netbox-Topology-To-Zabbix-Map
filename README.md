@@ -56,19 +56,19 @@ zbx-map-sync
 The GitHub workflow publishes images to Docker Hub using this repository name:
 
 ```text
-<dockerhub-username>/netbox-topology-zabbix-map
+matejlukac/netbox-topology-zabbix-map
 ```
 
 Pull and run:
 
 ```bash
-docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest
+docker run --rm --env-file .env matejlukac/netbox-topology-zabbix-map:latest
 ```
 
 Dry-run in Docker:
 
 ```bash
-docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest --dry-run
+docker run --rm --env-file .env matejlukac/netbox-topology-zabbix-map:latest --dry-run
 ```
 
 Build locally:
