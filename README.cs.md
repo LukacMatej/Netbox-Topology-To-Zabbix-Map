@@ -1,0 +1,131 @@
+# NetBox Topology do Zabbix Map Sync
+
+Jazyk:
+[![English](https://img.shields.io/badge/English-switch-0a7ea4)](README.md)
+[![Cesky](https://img.shields.io/badge/Cesky-active-cf2e2e)](README.cs.md)
+
+Python CLI aplikace a volitelna webhook sluzba, ktera nacita topologii z NetBoxu a vytvori nebo aktualizuje mapu v Zabbixu.
+
+## Funkce
+
+- Import topologie z NetBoxu (vcetne XML exportu z pluginu topology-views).
+- Mapovani popisku zarizeni z NetBoxu na hosty v Zabbixu.
+- Vytvoreni nebo aktualizace jedne mapy v Zabbixu se uzly a linkami.
+- Podpora dry-run rezimu pro bezpecne otestovani.
+- Podpora webhook/manual sync pomoci jednoducheho web serveru.
+- Podpora indikatoru linek z trigger mapovani v custom fieldu kabelu v NetBoxu.
+
+## Pozadavky
+
+- Python 3.10+
+- NetBox API token
+- Zabbix API prihlaseni nebo token
+
+## Rychly start
+
+1. Instalace:
+
+```bash
+pip install .
+```
+
+2. Nastavte povinne promenne prostredi:
+
+```bash
+export NETBOX_URL="https://netbox.example.com"
+export NETBOX_TOKEN="your-netbox-token"
+export ZABBIX_URL="https://zabbix.example.com/api_jsonrpc.php"
+export ZABBIX_USER="Admin"
+export ZABBIX_PASSWORD="zabbix"
+```
+
+3. Otestujte bez zapisu zmen:
+
+```bash
+zbx-map-sync --dry-run
+```
+
+4. Provedte synchronizaci:
+
+```bash
+zbx-map-sync
+```
+
+## Docker
+
+GitHub workflow publikuje image do Docker Hub pod nazvem:
+
+```text
+<dockerhub-username>/netbox-topology-zabbix-map
+```
+
+Pull a spusteni:
+
+```bash
+docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest
+```
+
+Dry-run v Dockeru:
+
+```bash
+docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest --dry-run
+```
+
+Lokalni build:
+
+```bash
+docker build -t netbox-topology-zabbix-map:local .
+```
+
+## Web rezim
+
+Spusteni HTTP rezimu:
+
+```bash
+zbx-map-sync --serve --host 0.0.0.0 --port 8080
+```
+
+Endpointy:
+
+- GET / : jednoducha stranka s odkazem na manualni synchronizaci
+- GET /sync : manualni spusteni synchronizace
+- POST /webhook : webhook trigger synchronizace
+
+## Konfigurace
+
+Povinne promenne:
+
+- NETBOX_URL
+- NETBOX_TOKEN
+- ZABBIX_URL
+- ZABBIX_USER a ZABBIX_PASSWORD, nebo ZABBIX_TOKEN
+
+Volitelne promenne:
+
+- NETBOX_TOPOLOGY_PATH (vychozi: /api/plugins/netbox_topology_views/xml-export/)
+- NETBOX_TOPOLOGY_QUERY (vychozi: show_unconnected=True&show_cables=True&limit=0)
+- NETBOX_REQUIRED_TAG
+- NETBOX_IGNORED_DEVICE_ROLES (carkou oddelene nazvy/slugs)
+- ZABBIX_TOKEN (Bearer token autentizace)
+- ZABBIX_MAP_NAME (vychozi: NetBox Topology)
+- ZABBIX_MAP_WIDTH (vychozi: 1280)
+- ZABBIX_MAP_HEIGHT (vychozi: 900)
+- ZABBIX_LAYOUT_GRID_X (vychozi: 40)
+- ZABBIX_LAYOUT_GRID_Y (vychozi: 40)
+- LOG_LEVEL (vychozi: DEBUG)
+
+## Mapovani triggeru linek
+
+Mapovani triggeru se cte z NetBox cable custom fieldu s nazvem zabbix_triggers.
+
+Priklad hodnoty:
+
+```json
+[{"triggers": ["trigger1", "trigger2"]}]
+```
+
+Chovani:
+
+- Kazdy nazev triggeru se hleda na obou hostech pripojenych k danemu kabelu.
+- Odpovidajici triggery se pridaji jako indikatory linek v Zabbixu.
+- Nenalezene triggery jsou reportovane jako unresolved a nezastavi synchronizaci.
