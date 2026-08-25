@@ -68,7 +68,8 @@ def main() -> int:
         print(
             f"Map '{sync_result.map_name}' {action}. "
             f"Nodes: {sync_result.total_nodes}, matched hosts: {sync_result.matched_hosts}, "
-            f"skipped nodes: {sync_result.skipped_nodes}, links: {sync_result.total_links}"
+            f"image nodes: {sync_result.image_nodes}, skipped nodes: {sync_result.skipped_nodes}, "
+            f"links: {sync_result.total_links}"
         )
         if sync_result.unresolved_link_rules:
             print(

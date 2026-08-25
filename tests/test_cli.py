@@ -32,6 +32,7 @@ def test_cli_prints_unresolved_rule_details(monkeypatch, capsys) -> None:
             total_nodes=1,
             matched_hosts=1,
             skipped_nodes=0,
+            image_nodes=0,
             total_links=0,
             unresolved_link_rules=1,
             unresolved_link_rule_details=(

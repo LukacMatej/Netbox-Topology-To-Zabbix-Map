@@ -10,7 +10,7 @@ COPY zabbix_map_sync /app/zabbix_map_sync
 
 RUN pip install --no-cache-dir .
 
-EXPOSE 7001 
+EXPOSE 7010
 
 ENTRYPOINT ["zbx-map-sync"]
-CMD ["--serve", "--host", "0.0.0.0", "--port", "7001","--log-level","DEBUG"]
+CMD ["--serve", "--host", "0.0.0.0", "--port", "7010","--log-level","DEBUG"]

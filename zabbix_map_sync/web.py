@@ -26,6 +26,7 @@ def _sync_result_to_json(result: SyncResult) -> dict:
         "map_name": result.map_name,
         "total_nodes": result.total_nodes,
         "matched_hosts": result.matched_hosts,
+        "image_nodes": result.image_nodes,
         "skipped_nodes": result.skipped_nodes,
         "total_links": result.total_links,
         "unresolved_link_rules": result.unresolved_link_rules,

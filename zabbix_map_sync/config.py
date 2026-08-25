@@ -21,10 +21,15 @@ class Settings:
     zabbix_map_height: int
     zabbix_layout_grid_x: int
     zabbix_layout_grid_y: int
+    zabbix_skipped_node_mode: str
+    zabbix_skipped_node_icon_id: str
 
 
 class ConfigurationError(ValueError):
     pass
+
+
+VALID_SKIPPED_NODE_MODES = ("skip", "image")
 
 
 def _read_required(name: str) -> str:
@@ -64,9 +69,17 @@ def load_settings() -> Settings:
         zabbix_map_height=int(os.getenv("ZABBIX_MAP_HEIGHT", "900")),
         zabbix_layout_grid_x=int(os.getenv("ZABBIX_LAYOUT_GRID_X", "40")),
         zabbix_layout_grid_y=int(os.getenv("ZABBIX_LAYOUT_GRID_Y", "40")),
+        zabbix_skipped_node_mode=os.getenv("ZABBIX_SKIPPED_NODE_MODE", "skip").strip().lower()
+        or "skip",
+        zabbix_skipped_node_icon_id=os.getenv("ZABBIX_SKIPPED_NODE_ICON_ID", "").strip(),
     )
     if not settings.zabbix_token and not (settings.zabbix_user and settings.zabbix_password):
         raise ConfigurationError(
             "Provide ZABBIX_TOKEN or both ZABBIX_USER and ZABBIX_PASSWORD"
+        )
+    if settings.zabbix_skipped_node_mode not in VALID_SKIPPED_NODE_MODES:
+        raise ConfigurationError(
+            "ZABBIX_SKIPPED_NODE_MODE must be one of: "
+            + ", ".join(VALID_SKIPPED_NODE_MODES)
         )
     return settings

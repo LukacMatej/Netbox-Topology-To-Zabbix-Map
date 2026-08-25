@@ -64,7 +64,7 @@ def test_build_map_payload_reports_unresolved_rule_details() -> None:
     }
     zbx = FakeZabbix()
 
-    payload, matched_hosts, link_count, unresolved_count, unresolved_details = build_map_payload(
+    payload, matched_hosts, image_nodes, link_count, unresolved_count, unresolved_details = build_map_payload(
         graph=graph,
         hosts_by_name=hosts,
         zabbix=zbx,
@@ -104,7 +104,7 @@ def test_build_map_payload_aggregates_triggers_from_duplicate_edges() -> None:
     }
     zbx = FakeZabbix()
 
-    payload, matched_hosts, link_count, unresolved_count, unresolved_details = build_map_payload(
+    payload, matched_hosts, image_nodes, link_count, unresolved_count, unresolved_details = build_map_payload(
         graph=graph,
         hosts_by_name=hosts,
         zabbix=zbx,
@@ -122,6 +122,100 @@ def test_build_map_payload_aggregates_triggers_from_duplicate_edges() -> None:
     assert unresolved_details[0] == "Cable trigger: Switch 1 <-> Switch 2 | trigger='Link down'"
     assert payload["links"][0]["indicator_type"] == 1
     assert payload["links"][0]["linktriggers"][0]["triggerid"] == "9001"
+
+
+def test_build_map_payload_skips_unmatched_nodes_by_default() -> None:
+    graph = TopologyGraph(
+        nodes=[
+            TopologyNode(node_id="n1", label="Switch 1"),
+            TopologyNode(node_id="n2", label="Switch 2"),
+            TopologyNode(node_id="n3", label="Unmanaged Patch Panel"),
+        ],
+        edges=[
+            TopologyEdge(source_id="n1", target_id="n2"),
+            TopologyEdge(source_id="n2", target_id="n3"),
+        ],
+    )
+    hosts = {
+        "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
+        "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
+    }
+    zbx = FakeZabbix()
+
+    payload, matched_hosts, image_nodes, link_count, unresolved_count, _ = build_map_payload(
+        graph=graph,
+        hosts_by_name=hosts,
+        zabbix=zbx,
+        map_name="Map",
+        width=1200,
+        height=800,
+        grid_x=40,
+        grid_y=40,
+        existing_map=None,
+    )
+
+    assert matched_hosts == 2
+    assert image_nodes == 0
+    assert len(payload["selements"]) == 2
+    # The edge to the unmatched node has no selement on the other side, so it's dropped.
+    assert link_count == 1
+
+
+def test_build_map_payload_renders_unmatched_nodes_as_images_when_enabled() -> None:
+    graph = TopologyGraph(
+        nodes=[
+            TopologyNode(node_id="n1", label="Switch 1"),
+            TopologyNode(node_id="n2", label="Switch 2"),
+            TopologyNode(node_id="n3", label="Unmanaged Patch Panel"),
+        ],
+        edges=[
+            TopologyEdge(source_id="n1", target_id="n2"),
+            TopologyEdge(source_id="n2", target_id="n3"),
+        ],
+    )
+    hosts = {
+        "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
+        "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
+    }
+    zbx = FakeZabbix()
+
+    payload, matched_hosts, image_nodes, link_count, unresolved_count, _ = build_map_payload(
+        graph=graph,
+        hosts_by_name=hosts,
+        zabbix=zbx,
+        map_name="Map",
+        width=1200,
+        height=800,
+        grid_x=40,
+        grid_y=40,
+        existing_map=None,
+        skipped_node_mode="image",
+        skipped_node_icon_id="200",
+    )
+
+    assert matched_hosts == 2
+    assert image_nodes == 1
+    assert len(payload["selements"]) == 3
+    # Both edges are now drawn since the image element gives the third node a selement.
+    assert link_count == 2
+
+    image_selements = [s for s in payload["selements"] if s["elementtype"] == 4]
+    assert len(image_selements) == 1
+    image_selement = image_selements[0]
+    assert image_selement["label"] == "Unmanaged Patch Panel"
+    assert image_selement["iconid_off"] == "200"
+    assert image_selement["elements"] == []
+
+    # The link touching the image node should have no trigger indicator since
+    # there is no Zabbix host to resolve triggers against.
+    image_selementid = image_selement["selementid"]
+    image_links = [
+        link
+        for link in payload["links"]
+        if image_selementid in (link["selementid1"], link["selementid2"])
+    ]
+    assert len(image_links) == 1
+    assert "linktriggers" not in image_links[0]
 
 
 def test_sync_topology_creates_map_when_missing() -> None:

@@ -12,6 +12,13 @@ DEFAULT_HOST_ICON_ID = "155"
 GRID_STEP_X = 40
 GRID_STEP_Y = 40
 
+# Zabbix sysmap selement "elementtype" values
+ELEMENT_TYPE_HOST = 0
+ELEMENT_TYPE_IMAGE = 4
+
+SKIPPED_NODE_MODE_SKIP = "skip"
+SKIPPED_NODE_MODE_IMAGE = "image"
+
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +30,7 @@ class SyncResult:
     total_nodes: int
     matched_hosts: int
     skipped_nodes: int
+    image_nodes: int
     total_links: int
     unresolved_link_rules: int
     unresolved_link_rule_details: tuple[str, ...]
@@ -273,10 +281,13 @@ def build_map_payload(
     grid_x: int,
     grid_y: int,
     existing_map: dict | None,
-) -> tuple[dict, int, int, int, tuple[str, ...]]:
+    skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
+    skipped_node_icon_id: str = "",
+) -> tuple[dict, int, int, int, int, tuple[str, ...]]:
     positions = _layout_positions(graph, width, height, grid_x, grid_y)
 
     existing_host_to_selementid: dict[str, str] = {}
+    existing_label_to_image_selementid: dict[str, str] = {}
     existing_links_by_pair: dict[tuple[str, str], dict] = {}
     max_selement_id = 0
     if existing_map:
@@ -289,6 +300,10 @@ def build_map_payload(
             hostid = _hostid_from_selement(selement)
             if hostid and selementid:
                 existing_host_to_selementid[hostid] = selementid
+            elif selementid and str(selement.get("elementtype")) == str(ELEMENT_TYPE_IMAGE):
+                label = str(selement.get("label", "")).strip()
+                if label:
+                    existing_label_to_image_selementid[label] = selementid
 
         for link in existing_map.get("links", []) or []:
             if not isinstance(link, dict):
@@ -303,14 +318,51 @@ def build_map_payload(
     host_by_node_id: dict[str, object] = {}
 
     next_selement_id = max_selement_id + 1
+    matched_host_count = 0
+    image_node_count = 0
+    image_icon_id = skipped_node_icon_id or DEFAULT_HOST_ICON_ID
 
     for node in graph.nodes:
         host = hosts_by_name.get(node.label)
+        x, y = positions.get(node.node_id, (40 + next_selement_id * 20, 40 + next_selement_id * 20))
+
         if not host:
-            logger.debug("Skipping topology node without Zabbix host match node_id=%s label=%s", node.node_id, node.label)
+            if skipped_node_mode != SKIPPED_NODE_MODE_IMAGE:
+                logger.debug(
+                    "Skipping topology node without Zabbix host match node_id=%s label=%s",
+                    node.node_id,
+                    node.label,
+                )
+                continue
+
+            selementid = existing_label_to_image_selementid.get(node.label)
+            if not selementid:
+                selementid = str(next_selement_id)
+                next_selement_id += 1
+
+            selements.append(
+                {
+                    "selementid": selementid,
+                    "elementtype": ELEMENT_TYPE_IMAGE,
+                    "elements": [],
+                    "label": node.label,
+                    "iconid_off": image_icon_id,
+                    "x": x,
+                    "y": y,
+                }
+            )
+            selement_by_node_id[node.node_id] = selementid
+            image_node_count += 1
+            logger.debug(
+                "Prepared image selement for unmatched node node_id=%s label=%s selementid=%s position=(%s,%s)",
+                node.node_id,
+                node.label,
+                selementid,
+                x,
+                y,
+            )
             continue
 
-        x, y = positions.get(node.node_id, (40 + next_selement_id * 20, 40 + next_selement_id * 20))
         selementid = existing_host_to_selementid.get(host.hostid)
         if not selementid:
             selementid = str(next_selement_id)
@@ -319,7 +371,7 @@ def build_map_payload(
         selements.append(
             {
                 "selementid": selementid,
-                "elementtype": 0,
+                "elementtype": ELEMENT_TYPE_HOST,
                 "elements": [{"hostid": host.hostid}],
                 "label": host.name or host.host,
                 "iconid_off": DEFAULT_HOST_ICON_ID,
@@ -329,6 +381,7 @@ def build_map_payload(
         )
         selement_by_node_id[node.node_id] = selementid
         host_by_node_id[node.node_id] = host
+        matched_host_count += 1
         logger.debug(
             "Prepared map selement node_id=%s label=%s hostid=%s selementid=%s position=(%s,%s)",
             node.node_id,
@@ -362,26 +415,34 @@ def build_map_payload(
 
         source_host = host_by_node_id.get(edge.source_id)
         target_host = host_by_node_id.get(edge.target_id)
-        if not source_host or not target_host:
+        pair = tuple(sorted((source_selementid, target_selementid)))
+
+        if source_host and target_host:
+            host_pair_key = _normalize_host_pair(source_host.name or source_host.host, target_host.name or target_host.host)
+            hostids = [source_host.hostid, target_host.hostid]
+        else:
+            # One (or both) endpoints is an image element (unmatched node) with no
+            # Zabbix host behind it, so there is nothing to resolve link triggers
+            # against. The link itself is still drawn between the two selements.
             logger.debug(
-                "Skipping edge because source/target host mapping is missing source_id=%s target_id=%s",
+                "Edge touches an unmatched/image node; drawing plain link without trigger "
+                "resolution source_id=%s target_id=%s",
                 edge.source_id,
                 edge.target_id,
             )
-            continue
+            host_pair_key = None
+            hostids = []
 
-        pair = tuple(sorted((source_selementid, target_selementid)))
-        host_pair_key = _normalize_host_pair(source_host.name or source_host.host, target_host.name or target_host.host)
         pair_entry = edges_by_pair.setdefault(
             pair,
             {
-                "hostids": [source_host.hostid, target_host.hostid],
+                "hostids": hostids,
                 "host_pair_key": host_pair_key,
                 "trigger_names": [],
             },
         )
 
-        if pair_entry["host_pair_key"] != host_pair_key:
+        if host_pair_key is not None and pair_entry["host_pair_key"] != host_pair_key:
             logger.debug(
                 "Pair host key mismatch for pair=%s previous=%s current=%s",
                 pair,
@@ -412,45 +473,52 @@ def build_map_payload(
         host_pair_key = edge_data["host_pair_key"]
         hostids = edge_data["hostids"]
         link_trigger_entries: list[dict] = []
-        for trigger_name in edge_data["trigger_names"]:
-            trigger_key = (host_pair_key[0], host_pair_key[1], trigger_name)
-            trigger_id = trigger_cache.get(trigger_key)
-            if trigger_key not in trigger_cache:
+        if host_pair_key is None:
+            if edge_data["trigger_names"]:
                 logger.debug(
-                    "Resolving link trigger host_pair=%s trigger_name=%s",
-                    host_pair_key,
-                    trigger_name,
+                    "Skipping trigger resolution for link pair=%s: endpoint has no matched Zabbix host",
+                    pair,
                 )
-                trigger_id = zabbix.find_trigger_id(
-                    hostids=hostids,
-                    trigger_name=trigger_name,
-                    match="auto",
-                )
-                trigger_cache[trigger_key] = trigger_id
+        else:
+            for trigger_name in edge_data["trigger_names"]:
+                trigger_key = (host_pair_key[0], host_pair_key[1], trigger_name)
+                trigger_id = trigger_cache.get(trigger_key)
+                if trigger_key not in trigger_cache:
+                    logger.debug(
+                        "Resolving link trigger host_pair=%s trigger_name=%s",
+                        host_pair_key,
+                        trigger_name,
+                    )
+                    trigger_id = zabbix.find_trigger_id(
+                        hostids=hostids,
+                        trigger_name=trigger_name,
+                        match="auto",
+                    )
+                    trigger_cache[trigger_key] = trigger_id
 
-            if trigger_id:
-                logger.debug(
-                    "Matched link trigger host_pair=%s trigger_name=%s triggerid=%s",
-                    host_pair_key,
-                    trigger_name,
-                    trigger_id,
-                )
-                link_trigger_entries.append(
-                    {
-                        "triggerid": trigger_id,
-                        "drawtype": "0",
-                        "color": "FF0000",
-                    }
-                )
-            else:
-                logger.warning(
-                    "Could not match cable trigger from NetBox host_pair=%s trigger_name=%s",
-                    host_pair_key,
-                    trigger_name,
-                )
-                unresolved_rules.add(
-                    (host_pair_key[0], host_pair_key[1], trigger_name)
-                )
+                if trigger_id:
+                    logger.debug(
+                        "Matched link trigger host_pair=%s trigger_name=%s triggerid=%s",
+                        host_pair_key,
+                        trigger_name,
+                        trigger_id,
+                    )
+                    link_trigger_entries.append(
+                        {
+                            "triggerid": trigger_id,
+                            "drawtype": "0",
+                            "color": "FF0000",
+                        }
+                    )
+                else:
+                    logger.warning(
+                        "Could not match cable trigger from NetBox host_pair=%s trigger_name=%s",
+                        host_pair_key,
+                        trigger_name,
+                    )
+                    unresolved_rules.add(
+                        (host_pair_key[0], host_pair_key[1], trigger_name)
+                    )
 
         existing_link = existing_links_by_pair.get(pair)
         if link_trigger_entries:
@@ -475,9 +543,10 @@ def build_map_payload(
         "links": links,
     }
     logger.info(
-        "Built map payload name=%s matched_hosts=%s links=%s unresolved_link_rules=%s",
+        "Built map payload name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",
         map_name,
-        len(selements),
+        matched_host_count,
+        image_node_count,
         len(links),
         len(unresolved_rules),
     )
@@ -485,7 +554,7 @@ def build_map_payload(
         f"Cable trigger: {host_a} <-> {host_b} | trigger='{trigger_name}'"
         for host_a, host_b, trigger_name in sorted(unresolved_rules)
     )
-    return payload, len(selements), len(links), len(unresolved_rules), unresolved_details
+    return payload, matched_host_count, image_node_count, len(links), len(unresolved_rules), unresolved_details
 
 
 def sync_topology_to_zabbix_map(
@@ -496,6 +565,8 @@ def sync_topology_to_zabbix_map(
     height: int,
     grid_x: int = GRID_STEP_X,
     grid_y: int = GRID_STEP_Y,
+    skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
+    skipped_node_icon_id: str = "",
 ) -> SyncResult:
     topology_names = sorted({node.label for node in graph.nodes if node.label})
     logger.debug("Syncing topology labels=%s", topology_names)
@@ -503,7 +574,7 @@ def sync_topology_to_zabbix_map(
 
     existing_map = zabbix.get_map_by_name(map_name)
 
-    payload, matched_hosts, link_count, unresolved_link_rules, unresolved_details = build_map_payload(
+    payload, matched_hosts, image_nodes, link_count, unresolved_link_rules, unresolved_details = build_map_payload(
         graph=graph,
         hosts_by_name=hosts,
         zabbix=zabbix,
@@ -513,6 +584,8 @@ def sync_topology_to_zabbix_map(
         grid_x=max(10, grid_x),
         grid_y=max(10, grid_y),
         existing_map=existing_map,
+        skipped_node_mode=skipped_node_mode,
+        skipped_node_icon_id=skipped_node_icon_id,
     )
 
     created = existing_map is None
@@ -527,7 +600,8 @@ def sync_topology_to_zabbix_map(
         map_name=map_name,
         total_nodes=len(graph.nodes),
         matched_hosts=matched_hosts,
-        skipped_nodes=max(0, len(graph.nodes) - matched_hosts),
+        skipped_nodes=max(0, len(graph.nodes) - matched_hosts - image_nodes),
+        image_nodes=image_nodes,
         total_links=link_count,
         unresolved_link_rules=unresolved_link_rules,
         unresolved_link_rule_details=unresolved_details,

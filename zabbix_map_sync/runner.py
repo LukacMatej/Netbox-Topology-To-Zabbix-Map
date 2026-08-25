@@ -78,6 +78,8 @@ def run_synchronization(dry_run: bool = False) -> SyncResult | DryRunResult:
         height=settings.zabbix_map_height,
         grid_x=settings.zabbix_layout_grid_x,
         grid_y=settings.zabbix_layout_grid_y,
+        skipped_node_mode=settings.zabbix_skipped_node_mode,
+        skipped_node_icon_id=settings.zabbix_skipped_node_icon_id,
     )
     logger.info(
         "Synchronization finished created=%s matched_hosts=%s total_links=%s unresolved_link_rules=%s",
