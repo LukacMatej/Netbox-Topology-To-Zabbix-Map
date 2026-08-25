@@ -743,6 +743,36 @@ class NetBoxClient:
             if not collapsed_any:
                 break
 
+        # Any ignored-role/patch-panel node that couldn't be spliced through
+        # (degree 0, 1, or 3+) would otherwise leak through untouched and
+        # show up on the map as an unmatched node. "Ignored" should mean
+        # ignored regardless of how many cables the device has, so drop
+        # these outright along with their incident edges.
+        remaining_passthrough_ids = {pid for pid in passthrough_ids if pid in node_by_id}
+        if remaining_passthrough_ids:
+            for panel_id in remaining_passthrough_ids:
+                degree = sum(
+                    1
+                    for edge in current_edges
+                    if edge.source_id == panel_id or edge.target_id == panel_id
+                )
+                logger.info(
+                    "Dropping ignored-role/patch-panel node with degree=%s (not exactly 2, "
+                    "cannot splice through) node_id=%s label=%s",
+                    degree,
+                    panel_id,
+                    node_by_id[panel_id].label,
+                )
+                node_by_id.pop(panel_id, None)
+
+            current_edges = [
+                edge
+                for edge in current_edges
+                if edge.source_id not in remaining_passthrough_ids
+                and edge.target_id not in remaining_passthrough_ids
+            ]
+            collapsed_count += len(remaining_passthrough_ids)
+
         if collapsed_count == 0:
             return graph
 

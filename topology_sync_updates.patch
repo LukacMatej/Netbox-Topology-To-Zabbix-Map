@@ -1,0 +1,1015 @@
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index aaedb17..c1be1ff 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -32,6 +32,7 @@ def test_cli_prints_unresolved_rule_details(monkeypatch, capsys) -> None:
+             total_nodes=1,
+             matched_hosts=1,
+             skipped_nodes=0,
++            image_nodes=0,
+             total_links=0,
+             unresolved_link_rules=1,
+             unresolved_link_rule_details=(
+diff --git a/tests/test_config.py b/tests/test_config.py
+index d763649..416a39e 100644
+--- a/tests/test_config.py
++++ b/tests/test_config.py
+@@ -21,6 +21,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
+         "ZABBIX_MAP_HEIGHT",
+         "ZABBIX_LAYOUT_GRID_X",
+         "ZABBIX_LAYOUT_GRID_Y",
++        "ZABBIX_SKIPPED_NODE_MODE",
++        "ZABBIX_SKIPPED_NODE_ICON_ID",
+     ]
+     for key in keys:
+         monkeypatch.delenv(key, raising=False)
+@@ -39,6 +41,33 @@ def test_load_settings_with_token(monkeypatch: pytest.MonkeyPatch) -> None:
+     assert settings.netbox_ignored_device_roles == ()
+     assert settings.zabbix_map_width == 1280
+     assert settings.zabbix_layout_grid_x == 40
++    assert settings.zabbix_skipped_node_mode == "skip"
++    assert settings.zabbix_skipped_node_icon_id == ""
++
++
++def test_load_settings_skipped_node_image_mode(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setenv("NETBOX_URL", "http://netbox.local")
++    monkeypatch.setenv("NETBOX_TOKEN", "nb-token")
++    monkeypatch.setenv("ZABBIX_URL", "http://zabbix.local/api_jsonrpc.php")
++    monkeypatch.setenv("ZABBIX_TOKEN", "zbx-token")
++    monkeypatch.setenv("ZABBIX_SKIPPED_NODE_MODE", "IMAGE")
++    monkeypatch.setenv("ZABBIX_SKIPPED_NODE_ICON_ID", "200")
++
++    settings = load_settings()
++
++    assert settings.zabbix_skipped_node_mode == "image"
++    assert settings.zabbix_skipped_node_icon_id == "200"
++
++
++def test_load_settings_rejects_invalid_skipped_node_mode(monkeypatch: pytest.MonkeyPatch) -> None:
++    monkeypatch.setenv("NETBOX_URL", "http://netbox.local")
++    monkeypatch.setenv("NETBOX_TOKEN", "nb-token")
++    monkeypatch.setenv("ZABBIX_URL", "http://zabbix.local/api_jsonrpc.php")
++    monkeypatch.setenv("ZABBIX_TOKEN", "zbx-token")
++    monkeypatch.setenv("ZABBIX_SKIPPED_NODE_MODE", "hide")
++
++    with pytest.raises(ConfigurationError, match="ZABBIX_SKIPPED_NODE_MODE"):
++        load_settings()
+ 
+ 
+ def test_load_settings_reads_ignored_device_roles_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+diff --git a/tests/test_netbox.py b/tests/test_netbox.py
+index 26f331a..53c9884 100644
+--- a/tests/test_netbox.py
++++ b/tests/test_netbox.py
+@@ -329,6 +329,114 @@ def test_fetch_topology_xml_collapses_pp_abbreviation_passthrough(monkeypatch: p
+     assert {graph.edges[0].source_id, graph.edges[0].target_id} == {"node_1", "node_618"}
+ 
+ 
++def test_fetch_topology_xml_drops_ignored_role_leaf_node(monkeypatch: pytest.MonkeyPatch) -> None:
++    # A wall-box/patch-panel with only a single uplink (degree 1) can't be
++    # spliced through like an in-line passthrough node - it should simply be
++    # dropped from the graph entirely, along with its one edge, rather than
++    # leaking through untouched.
++    xml_payload = """
++    <mxGraphModel>
++      <root>
++        <mxCell id='0'/>
++        <mxCell id='1'/>
++        <mxCell id='node_1' vertex='1' value='Switch 1'/>
++        <mxCell id='node_2' vertex='1' value='Wall Box 12'/>
++        <mxCell id='edge_1' edge='1' source='node_1' target='node_2'/>
++      </root>
++    </mxGraphModel>
++    """
++
++    def fake_get(url, params=None, timeout=30):
++        if "xml-export" in url:
++            return FakeResponse(text=xml_payload, headers={"Content-Type": "application/xml"})
++        if "api/dcim/cables/" in url:
++            return FakeResponse(json_data={"results": []}, headers={"Content-Type": "application/json"})
++        if "api/dcim/devices/" in url:
++            return FakeResponse(
++                json_data={
++                    "results": [
++                        {
++                            "id": 1,
++                            "name": "Switch 1",
++                            "tags": [{"name": "Zabbix Map", "slug": "zabbix-map"}],
++                            "role": {"name": "Switch", "slug": "switch"},
++                        },
++                        {
++                            "id": 2,
++                            "name": "Wall Box 12",
++                            "tags": [{"name": "Other", "slug": "other"}],
++                            "role": {"name": "Wall Box", "slug": "wall-box"},
++                        },
++                    ]
++                },
++                headers={"Content-Type": "application/json"},
++            )
++        return FakeResponse(json_data={}, headers={"Content-Type": "application/json"})
++
++    client = NetBoxClient(
++        base_url="http://netbox.local",
++        token="token",
++        required_tag="Zabbix Map",
++        ignored_device_roles=("patch-panel", "wall-box"),
++    )
++    monkeypatch.setattr(client.session, "get", fake_get)
++
++    graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
++
++    assert len(graph.nodes) == 1
++    assert graph.nodes[0].label == "Switch 1"
++    assert graph.edges == []
++
++
++def test_fetch_topology_xml_drops_ignored_role_branching_node(monkeypatch: pytest.MonkeyPatch) -> None:
++    # A patch panel with 3+ connections can't be unambiguously spliced
++    # through either - it should also be dropped, along with all of its
++    # incident edges.
++    xml_payload = """
++    <mxGraphModel>
++      <root>
++        <mxCell id='0'/>
++        <mxCell id='1'/>
++        <mxCell id='node_1' vertex='1' value='Switch 1'/>
++        <mxCell id='node_2' vertex='1' value='Switch 2'/>
++        <mxCell id='node_3' vertex='1' value='Switch 3'/>
++        <mxCell id='node_4' vertex='1' value='Patch Panel A'/>
++        <mxCell id='edge_1' edge='1' source='node_1' target='node_4'/>
++        <mxCell id='edge_2' edge='1' source='node_2' target='node_4'/>
++        <mxCell id='edge_3' edge='1' source='node_3' target='node_4'/>
++      </root>
++    </mxGraphModel>
++    """
++
++    calls = {"count": 0}
++
++    def fake_get(url, params=None, timeout=30):
++        calls["count"] += 1
++        if calls["count"] == 1:
++            return FakeResponse(text=xml_payload, headers={"Content-Type": "application/xml"})
++        if calls["count"] == 2:
++            return FakeResponse(json_data={"results": []}, headers={"Content-Type": "application/json"})
++        return FakeResponse(
++            json_data={
++                "results": [
++                    {"id": 1, "name": "Switch 1", "tags": [{"name": "Zabbix Map", "slug": "zabbix-map"}]},
++                    {"id": 2, "name": "Switch 2", "tags": [{"name": "Zabbix Map", "slug": "zabbix-map"}]},
++                    {"id": 3, "name": "Switch 3", "tags": [{"name": "Zabbix Map", "slug": "zabbix-map"}]},
++                    {"id": 4, "name": "Patch Panel A", "tags": [{"name": "Other", "slug": "other"}]},
++                ]
++            },
++            headers={"Content-Type": "application/json"},
++        )
++
++    client = NetBoxClient(base_url="http://netbox.local", token="token", required_tag="Zabbix Map")
++    monkeypatch.setattr(client.session, "get", fake_get)
++
++    graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
++
++    assert sorted(node.label for node in graph.nodes) == ["Switch 1", "Switch 2", "Switch 3"]
++    assert graph.edges == []
++
++
+ def test_fetch_topology_xml_collapses_role_based_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+     xml_payload = """
+     <mxGraphModel>
+diff --git a/tests/test_sync.py b/tests/test_sync.py
+index c30f3a4..b244163 100644
+--- a/tests/test_sync.py
++++ b/tests/test_sync.py
+@@ -64,7 +64,7 @@ def test_build_map_payload_reports_unresolved_rule_details() -> None:
+     }
+     zbx = FakeZabbix()
+ 
+-    payload, matched_hosts, link_count, unresolved_count, unresolved_details = build_map_payload(
++    payload, matched_hosts, image_nodes, link_count, unresolved_count, unresolved_details = build_map_payload(
+         graph=graph,
+         hosts_by_name=hosts,
+         zabbix=zbx,
+@@ -104,7 +104,7 @@ def test_build_map_payload_aggregates_triggers_from_duplicate_edges() -> None:
+     }
+     zbx = FakeZabbix()
+ 
+-    payload, matched_hosts, link_count, unresolved_count, unresolved_details = build_map_payload(
++    payload, matched_hosts, image_nodes, link_count, unresolved_count, unresolved_details = build_map_payload(
+         graph=graph,
+         hosts_by_name=hosts,
+         zabbix=zbx,
+@@ -124,6 +124,135 @@ def test_build_map_payload_aggregates_triggers_from_duplicate_edges() -> None:
+     assert payload["links"][0]["linktriggers"][0]["triggerid"] == "9001"
+ 
+ 
++def test_build_map_payload_skips_unmatched_nodes_by_default() -> None:
++    graph = TopologyGraph(
++        nodes=[
++            TopologyNode(node_id="n1", label="Switch 1"),
++            TopologyNode(node_id="n2", label="Switch 2"),
++            TopologyNode(node_id="n3", label="Unmanaged Patch Panel"),
++        ],
++        edges=[
++            TopologyEdge(source_id="n1", target_id="n2"),
++            TopologyEdge(source_id="n2", target_id="n3"),
++        ],
++    )
++    hosts = {
++        "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
++        "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
++    }
++    zbx = FakeZabbix()
++
++    payload, matched_hosts, image_nodes, link_count, unresolved_count, _ = build_map_payload(
++        graph=graph,
++        hosts_by_name=hosts,
++        zabbix=zbx,
++        map_name="Map",
++        width=1200,
++        height=800,
++        grid_x=40,
++        grid_y=40,
++        existing_map=None,
++    )
++
++    assert matched_hosts == 2
++    assert image_nodes == 0
++    assert len(payload["selements"]) == 2
++    # The edge to the unmatched node has no selement on the other side, so it's dropped.
++    assert link_count == 1
++
++
++def test_build_map_payload_renders_unmatched_nodes_as_images_when_enabled() -> None:
++    graph = TopologyGraph(
++        nodes=[
++            TopologyNode(node_id="n1", label="Switch 1"),
++            TopologyNode(node_id="n2", label="Switch 2"),
++            TopologyNode(node_id="n3", label="Unmanaged Patch Panel"),
++        ],
++        edges=[
++            TopologyEdge(source_id="n1", target_id="n2"),
++            TopologyEdge(source_id="n2", target_id="n3"),
++        ],
++    )
++    hosts = {
++        "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
++        "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
++    }
++    zbx = FakeZabbix()
++
++    payload, matched_hosts, image_nodes, link_count, unresolved_count, _ = build_map_payload(
++        graph=graph,
++        hosts_by_name=hosts,
++        zabbix=zbx,
++        map_name="Map",
++        width=1200,
++        height=800,
++        grid_x=40,
++        grid_y=40,
++        existing_map=None,
++        skipped_node_mode="image",
++        skipped_node_icon_id="200",
++    )
++
++    assert matched_hosts == 2
++    assert image_nodes == 1
++    assert len(payload["selements"]) == 3
++    # Both edges are now drawn since the image element gives the third node a selement.
++    assert link_count == 2
++
++    image_selements = [s for s in payload["selements"] if s["elementtype"] == 4]
++    assert len(image_selements) == 1
++    image_selement = image_selements[0]
++    assert image_selement["label"] == "Unmanaged Patch Panel"
++    assert image_selement["iconid_off"] == "200"
++    assert image_selement["elements"] == []
++
++    # The link touching the image node should have no trigger indicator since
++    # there is no Zabbix host to resolve triggers against.
++    image_selementid = image_selement["selementid"]
++    image_links = [
++        link
++        for link in payload["links"]
++        if image_selementid in (link["selementid1"], link["selementid2"])
++    ]
++    assert len(image_links) == 1
++    assert "linktriggers" not in image_links[0]
++
++    # Zabbix's default map-wide label mode ("element name") has nothing to
++    # resolve for image-type elements and falls back to a generic literal
++    # "Image" placeholder unless we override label_type_image explicitly.
++    assert payload["label_type_image"] == "0"
++
++
++def test_build_map_payload_omits_label_type_image_when_no_image_nodes() -> None:
++    graph = TopologyGraph(
++        nodes=[
++            TopologyNode(node_id="n1", label="Switch 1"),
++            TopologyNode(node_id="n2", label="Switch 2"),
++        ],
++        edges=[TopologyEdge(source_id="n1", target_id="n2")],
++    )
++    hosts = {
++        "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
++        "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
++    }
++    zbx = FakeZabbix()
++
++    payload, _, image_nodes, _, _, _ = build_map_payload(
++        graph=graph,
++        hosts_by_name=hosts,
++        zabbix=zbx,
++        map_name="Map",
++        width=1200,
++        height=800,
++        grid_x=40,
++        grid_y=40,
++        existing_map=None,
++    )
++
++    assert image_nodes == 0
++    assert "label_type_image" not in payload
++
++
+ def test_sync_topology_creates_map_when_missing() -> None:
+     graph = TopologyGraph(
+         nodes=[
+diff --git a/tests/test_web.py b/tests/test_web.py
+index 6c06279..b482a38 100644
+--- a/tests/test_web.py
++++ b/tests/test_web.py
+@@ -24,6 +24,7 @@ def test_get_sync_endpoint(monkeypatch) -> None:
+         total_nodes=3,
+         matched_hosts=3,
+         skipped_nodes=0,
++        image_nodes=0,
+         total_links=2,
+         unresolved_link_rules=0,
+         unresolved_link_rule_details=(),
+@@ -51,6 +52,7 @@ def test_post_webhook_endpoint(monkeypatch) -> None:
+         total_nodes=4,
+         matched_hosts=3,
+         skipped_nodes=1,
++        image_nodes=0,
+         total_links=3,
+         unresolved_link_rules=1,
+         unresolved_link_rule_details=("Rule #1: A <-> B | trigger='Down' | match='auto'",),
+diff --git a/zabbix_map_sync/cli.py b/zabbix_map_sync/cli.py
+index caff0ed..e382bb3 100644
+--- a/zabbix_map_sync/cli.py
++++ b/zabbix_map_sync/cli.py
+@@ -68,7 +68,8 @@ def main() -> int:
+         print(
+             f"Map '{sync_result.map_name}' {action}. "
+             f"Nodes: {sync_result.total_nodes}, matched hosts: {sync_result.matched_hosts}, "
+-            f"skipped nodes: {sync_result.skipped_nodes}, links: {sync_result.total_links}"
++            f"image nodes: {sync_result.image_nodes}, skipped nodes: {sync_result.skipped_nodes}, "
++            f"links: {sync_result.total_links}"
+         )
+         if sync_result.unresolved_link_rules:
+             print(
+diff --git a/zabbix_map_sync/config.py b/zabbix_map_sync/config.py
+index 0694282..c41b751 100644
+--- a/zabbix_map_sync/config.py
++++ b/zabbix_map_sync/config.py
+@@ -21,12 +21,17 @@ class Settings:
+     zabbix_map_height: int
+     zabbix_layout_grid_x: int
+     zabbix_layout_grid_y: int
++    zabbix_skipped_node_mode: str
++    zabbix_skipped_node_icon_id: str
+ 
+ 
+ class ConfigurationError(ValueError):
+     pass
+ 
+ 
++VALID_SKIPPED_NODE_MODES = ("skip", "image")
++
++
+ def _read_required(name: str) -> str:
+     value = os.getenv(name, "").strip()
+     if not value:
+@@ -64,9 +69,17 @@ def load_settings() -> Settings:
+         zabbix_map_height=int(os.getenv("ZABBIX_MAP_HEIGHT", "900")),
+         zabbix_layout_grid_x=int(os.getenv("ZABBIX_LAYOUT_GRID_X", "40")),
+         zabbix_layout_grid_y=int(os.getenv("ZABBIX_LAYOUT_GRID_Y", "40")),
++        zabbix_skipped_node_mode=os.getenv("ZABBIX_SKIPPED_NODE_MODE", "skip").strip().lower()
++        or "skip",
++        zabbix_skipped_node_icon_id=os.getenv("ZABBIX_SKIPPED_NODE_ICON_ID", "").strip(),
+     )
+     if not settings.zabbix_token and not (settings.zabbix_user and settings.zabbix_password):
+         raise ConfigurationError(
+             "Provide ZABBIX_TOKEN or both ZABBIX_USER and ZABBIX_PASSWORD"
+         )
++    if settings.zabbix_skipped_node_mode not in VALID_SKIPPED_NODE_MODES:
++        raise ConfigurationError(
++            "ZABBIX_SKIPPED_NODE_MODE must be one of: "
++            + ", ".join(VALID_SKIPPED_NODE_MODES)
++        )
+     return settings
+diff --git a/zabbix_map_sync/netbox.py b/zabbix_map_sync/netbox.py
+index 7bbe598..a3d2c4c 100644
+--- a/zabbix_map_sync/netbox.py
++++ b/zabbix_map_sync/netbox.py
+@@ -743,6 +743,36 @@ class NetBoxClient:
+             if not collapsed_any:
+                 break
+ 
++        # Any ignored-role/patch-panel node that couldn't be spliced through
++        # (degree 0, 1, or 3+) would otherwise leak through untouched and
++        # show up on the map as an unmatched node. "Ignored" should mean
++        # ignored regardless of how many cables the device has, so drop
++        # these outright along with their incident edges.
++        remaining_passthrough_ids = {pid for pid in passthrough_ids if pid in node_by_id}
++        if remaining_passthrough_ids:
++            for panel_id in remaining_passthrough_ids:
++                degree = sum(
++                    1
++                    for edge in current_edges
++                    if edge.source_id == panel_id or edge.target_id == panel_id
++                )
++                logger.info(
++                    "Dropping ignored-role/patch-panel node with degree=%s (not exactly 2, "
++                    "cannot splice through) node_id=%s label=%s",
++                    degree,
++                    panel_id,
++                    node_by_id[panel_id].label,
++                )
++                node_by_id.pop(panel_id, None)
++
++            current_edges = [
++                edge
++                for edge in current_edges
++                if edge.source_id not in remaining_passthrough_ids
++                and edge.target_id not in remaining_passthrough_ids
++            ]
++            collapsed_count += len(remaining_passthrough_ids)
++
+         if collapsed_count == 0:
+             return graph
+ 
+diff --git a/zabbix_map_sync/runner.py b/zabbix_map_sync/runner.py
+index ad4dbdd..94fa3ae 100644
+--- a/zabbix_map_sync/runner.py
++++ b/zabbix_map_sync/runner.py
+@@ -78,6 +78,8 @@ def run_synchronization(dry_run: bool = False) -> SyncResult | DryRunResult:
+         height=settings.zabbix_map_height,
+         grid_x=settings.zabbix_layout_grid_x,
+         grid_y=settings.zabbix_layout_grid_y,
++        skipped_node_mode=settings.zabbix_skipped_node_mode,
++        skipped_node_icon_id=settings.zabbix_skipped_node_icon_id,
+     )
+     logger.info(
+         "Synchronization finished created=%s matched_hosts=%s total_links=%s unresolved_link_rules=%s",
+diff --git a/zabbix_map_sync/sync.py b/zabbix_map_sync/sync.py
+index d638182..ca76d20 100644
+--- a/zabbix_map_sync/sync.py
++++ b/zabbix_map_sync/sync.py
+@@ -2,7 +2,7 @@ from __future__ import annotations
+ 
+ import logging
+ import math
+-from collections import defaultdict, deque
++from collections import deque
+ from dataclasses import dataclass
+ 
+ from .models import TopologyGraph, TopologyNode
+@@ -12,6 +12,13 @@ DEFAULT_HOST_ICON_ID = "155"
+ GRID_STEP_X = 40
+ GRID_STEP_Y = 40
+ 
++# Zabbix sysmap selement "elementtype" values
++ELEMENT_TYPE_HOST = 0
++ELEMENT_TYPE_IMAGE = 4
++
++SKIPPED_NODE_MODE_SKIP = "skip"
++SKIPPED_NODE_MODE_IMAGE = "image"
++
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -23,6 +30,7 @@ class SyncResult:
+     total_nodes: int
+     matched_hosts: int
+     skipped_nodes: int
++    image_nodes: int
+     total_links: int
+     unresolved_link_rules: int
+     unresolved_link_rule_details: tuple[str, ...]
+@@ -76,99 +84,102 @@ def _connected_components(node_ids: list[str], adjacency: dict[str, set[str]]) -
+     return components
+ 
+ 
+-def _is_ring_component(component: list[str], adjacency: dict[str, set[str]]) -> tuple[bool, str]:
+-    center = max(component, key=lambda node_id: len(adjacency.get(node_id, set())))
+-    center_degree = len(adjacency.get(center, set()))
+-    if center_degree < 2:
+-        return False, center
+-
+-    leaf_count = 0
+-    for node_id in component:
+-        if node_id == center:
+-            continue
+-        neighbors = adjacency.get(node_id, set())
+-        if len(neighbors) <= 1 and center in neighbors:
+-            leaf_count += 1
+-
+-    non_center = max(1, len(component) - 1)
+-    is_ring = leaf_count / non_center >= 0.6 or center_degree >= 3
+-    return is_ring, center
+-
+-
+-def _layout_component_ring(
++def _fruchterman_reingold_layout(
+     component: list[str],
+-    center: str,
+     adjacency: dict[str, set[str]],
++    iterations: int = 120,
+ ) -> tuple[dict[str, tuple[int, int]], int, int]:
+-    first_ring = sorted(adjacency.get(center, set()) & set(component))
+-    remaining = sorted(node_id for node_id in component if node_id != center and node_id not in first_ring)
+-
+-    ring1_radius = max(90, 36 * max(1, len(first_ring)))
+-    ring2_radius = ring1_radius + 95 if remaining else ring1_radius
+-    size = max(260, 2 * ring2_radius + 90)
+-
+-    center_x = size // 2
+-    center_y = size // 2
+-    positions: dict[str, tuple[int, int]] = {center: (center_x, center_y)}
+-
+-    for idx, node_id in enumerate(first_ring):
+-        angle = 2 * math.pi * idx / max(1, len(first_ring))
+-        positions[node_id] = (
+-            int(center_x + ring1_radius * math.cos(angle)),
+-            int(center_y + ring1_radius * math.sin(angle)),
+-        )
+-
+-    for idx, node_id in enumerate(remaining):
+-        angle = 2 * math.pi * idx / max(1, len(remaining))
+-        positions[node_id] = (
+-            int(center_x + ring2_radius * math.cos(angle)),
+-            int(center_y + ring2_radius * math.sin(angle)),
+-        )
+-
+-    return positions, size, size
+-
+-
+-def _layout_component_lanes(component: list[str], adjacency: dict[str, set[str]]) -> tuple[dict[str, tuple[int, int]], int, int]:
+-    root = max(component, key=lambda node_id: len(adjacency.get(node_id, set())))
+-
+-    level: dict[str, int] = {root: 0}
+-    queue: deque[str] = deque([root])
+-    while queue:
+-        current = queue.popleft()
+-        for neighbor in sorted(adjacency.get(current, set())):
+-            if neighbor not in level:
+-                level[neighbor] = level[current] + 1
+-                queue.append(neighbor)
+-
+-    for node_id in component:
+-        level.setdefault(node_id, 0)
+-
+-    by_level: dict[int, list[str]] = defaultdict(list)
+-    for node_id in component:
+-        by_level[level[node_id]].append(node_id)
+-
+-    for lvl_nodes in by_level.values():
+-        lvl_nodes.sort(key=lambda node_id: (-len(adjacency.get(node_id, set())), node_id))
+-
+-    lane_x_gap = 230
+-    lane_y_gap = 130
+-    max_level = max(by_level)
+-    max_nodes_level = max(len(nodes) for nodes in by_level.values())
+-
+-    width = max(340, (max_level + 1) * lane_x_gap + 120)
+-    height = max(240, max_nodes_level * lane_y_gap + 120)
+-
+-    positions: dict[str, tuple[int, int]] = {}
+-    for lvl in range(max_level + 1):
+-        nodes_in_level = by_level.get(lvl, [])
+-        if not nodes_in_level:
+-            continue
+-        x = 70 + lvl * lane_x_gap
+-        stack_height = (len(nodes_in_level) - 1) * lane_y_gap
+-        start_y = (height - stack_height) // 2
+-        for idx, node_id in enumerate(nodes_in_level):
+-            positions[node_id] = (x, start_y + idx * lane_y_gap)
+-
++    """Force-directed layout for a single connected component.
++
++    Classic Fruchterman-Reingold: nodes repel each other, edges act as
++    springs pulling connected nodes together, and a cooling "temperature"
++    shrinks the max step size each iteration so the system settles instead
++    of oscillating. Initial positions are placed deterministically (sorted
++    node order around a circle, no RNG) so the same graph always produces
++    the same layout on re-sync.
++    """
++    n = len(component)
++
++    if n == 1:
++        size = 140
++        return {component[0]: (size // 2, size // 2)}, size, size
++
++    # Canvas the simulation runs in scales with node count so dense
++    # components get more breathing room without the whole map exploding.
++    side = max(220, int(70 * math.sqrt(n)))
++    width = height = side
++    area = float(width * height)
++    k = math.sqrt(area / n)  # ideal spring/edge length
++
++    ordered = sorted(component)
++    pos: dict[str, list[float]] = {}
++    cx, cy = width / 2, height / 2
++    radius = min(width, height) * 0.35
++    for idx, node_id in enumerate(ordered):
++        angle = 2 * math.pi * idx / n
++        pos[node_id] = [cx + radius * math.cos(angle), cy + radius * math.sin(angle)]
++
++    temperature = side / 10.0
++    cooling = temperature / max(1, iterations)
++    margin = 30.0
++
++    for _ in range(iterations):
++        disp: dict[str, list[float]] = {node_id: [0.0, 0.0] for node_id in component}
++
++        # Repulsion: every pair of nodes pushes apart (Coulomb-like force).
++        for i in range(n):
++            a = ordered[i]
++            ax, ay = pos[a]
++            for j in range(i + 1, n):
++                b = ordered[j]
++                bx, by = pos[b]
++                dx, dy = ax - bx, ay - by
++                dist = math.hypot(dx, dy) or 0.01
++                force = (k * k) / dist
++                fx, fy = (dx / dist) * force, (dy / dist) * force
++                disp[a][0] += fx
++                disp[a][1] += fy
++                disp[b][0] -= fx
++                disp[b][1] -= fy
++
++        # Attraction: connected nodes pull together (Hooke-like spring).
++        seen_edges: set[tuple[str, str]] = set()
++        for node_id in component:
++            for neighbor in adjacency.get(node_id, set()):
++                if neighbor not in pos:
++                    continue
++                edge_key = tuple(sorted((node_id, neighbor)))
++                if edge_key in seen_edges:
++                    continue
++                seen_edges.add(edge_key)
++                a, b = edge_key
++                ax, ay = pos[a]
++                bx, by = pos[b]
++                dx, dy = ax - bx, ay - by
++                dist = math.hypot(dx, dy) or 0.01
++                force = (dist * dist) / k
++                fx, fy = (dx / dist) * force, (dy / dist) * force
++                disp[a][0] -= fx
++                disp[a][1] -= fy
++                disp[b][0] += fx
++                disp[b][1] += fy
++
++        # Apply displacement capped by the current temperature, then clamp
++        # to the component's canvas so nodes never drift off it.
++        for node_id in component:
++            dx, dy = disp[node_id]
++            dist = math.hypot(dx, dy) or 0.01
++            capped = min(dist, temperature)
++            x, y = pos[node_id]
++            x += (dx / dist) * capped
++            y += (dy / dist) * capped
++            x = min(width - margin, max(margin, x))
++            y = min(height - margin, max(margin, y))
++            pos[node_id] = [x, y]
++
++        temperature = max(1.0, temperature - cooling)
++
++    positions = {node_id: (int(round(x)), int(round(y))) for node_id, (x, y) in pos.items()}
+     return positions, width, height
+ 
+ 
+@@ -239,11 +250,7 @@ def _layout_positions(
+ 
+     positions: dict[str, tuple[int, int]] = {}
+     for component in components:
+-        is_ring, center = _is_ring_component(component, adjacency)
+-        if is_ring:
+-            local_positions, comp_width, comp_height = _layout_component_ring(component, center, adjacency)
+-        else:
+-            local_positions, comp_width, comp_height = _layout_component_lanes(component, adjacency)
++        local_positions, comp_width, comp_height = _fruchterman_reingold_layout(component, adjacency)
+ 
+         if current_x + comp_width > width - padding and current_x > padding:
+             current_x = padding
+@@ -273,10 +280,13 @@ def build_map_payload(
+     grid_x: int,
+     grid_y: int,
+     existing_map: dict | None,
+-) -> tuple[dict, int, int, int, tuple[str, ...]]:
++    skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
++    skipped_node_icon_id: str = "",
++) -> tuple[dict, int, int, int, int, tuple[str, ...]]:
+     positions = _layout_positions(graph, width, height, grid_x, grid_y)
+ 
+     existing_host_to_selementid: dict[str, str] = {}
++    existing_label_to_image_selementid: dict[str, str] = {}
+     existing_links_by_pair: dict[tuple[str, str], dict] = {}
+     max_selement_id = 0
+     if existing_map:
+@@ -289,6 +299,10 @@ def build_map_payload(
+             hostid = _hostid_from_selement(selement)
+             if hostid and selementid:
+                 existing_host_to_selementid[hostid] = selementid
++            elif selementid and str(selement.get("elementtype")) == str(ELEMENT_TYPE_IMAGE):
++                label = str(selement.get("label", "")).strip()
++                if label:
++                    existing_label_to_image_selementid[label] = selementid
+ 
+         for link in existing_map.get("links", []) or []:
+             if not isinstance(link, dict):
+@@ -303,14 +317,51 @@ def build_map_payload(
+     host_by_node_id: dict[str, object] = {}
+ 
+     next_selement_id = max_selement_id + 1
++    matched_host_count = 0
++    image_node_count = 0
++    image_icon_id = skipped_node_icon_id or DEFAULT_HOST_ICON_ID
+ 
+     for node in graph.nodes:
+         host = hosts_by_name.get(node.label)
++        x, y = positions.get(node.node_id, (40 + next_selement_id * 20, 40 + next_selement_id * 20))
++
+         if not host:
+-            logger.debug("Skipping topology node without Zabbix host match node_id=%s label=%s", node.node_id, node.label)
++            if skipped_node_mode != SKIPPED_NODE_MODE_IMAGE:
++                logger.debug(
++                    "Skipping topology node without Zabbix host match node_id=%s label=%s",
++                    node.node_id,
++                    node.label,
++                )
++                continue
++
++            selementid = existing_label_to_image_selementid.get(node.label)
++            if not selementid:
++                selementid = str(next_selement_id)
++                next_selement_id += 1
++
++            selements.append(
++                {
++                    "selementid": selementid,
++                    "elementtype": ELEMENT_TYPE_IMAGE,
++                    "elements": [],
++                    "label": node.label,
++                    "iconid_off": image_icon_id,
++                    "x": x,
++                    "y": y,
++                }
++            )
++            selement_by_node_id[node.node_id] = selementid
++            image_node_count += 1
++            logger.debug(
++                "Prepared image selement for unmatched node node_id=%s label=%s selementid=%s position=(%s,%s)",
++                node.node_id,
++                node.label,
++                selementid,
++                x,
++                y,
++            )
+             continue
+ 
+-        x, y = positions.get(node.node_id, (40 + next_selement_id * 20, 40 + next_selement_id * 20))
+         selementid = existing_host_to_selementid.get(host.hostid)
+         if not selementid:
+             selementid = str(next_selement_id)
+@@ -319,7 +370,7 @@ def build_map_payload(
+         selements.append(
+             {
+                 "selementid": selementid,
+-                "elementtype": 0,
++                "elementtype": ELEMENT_TYPE_HOST,
+                 "elements": [{"hostid": host.hostid}],
+                 "label": host.name or host.host,
+                 "iconid_off": DEFAULT_HOST_ICON_ID,
+@@ -329,6 +380,7 @@ def build_map_payload(
+         )
+         selement_by_node_id[node.node_id] = selementid
+         host_by_node_id[node.node_id] = host
++        matched_host_count += 1
+         logger.debug(
+             "Prepared map selement node_id=%s label=%s hostid=%s selementid=%s position=(%s,%s)",
+             node.node_id,
+@@ -362,26 +414,34 @@ def build_map_payload(
+ 
+         source_host = host_by_node_id.get(edge.source_id)
+         target_host = host_by_node_id.get(edge.target_id)
+-        if not source_host or not target_host:
++        pair = tuple(sorted((source_selementid, target_selementid)))
++
++        if source_host and target_host:
++            host_pair_key = _normalize_host_pair(source_host.name or source_host.host, target_host.name or target_host.host)
++            hostids = [source_host.hostid, target_host.hostid]
++        else:
++            # One (or both) endpoints is an image element (unmatched node) with no
++            # Zabbix host behind it, so there is nothing to resolve link triggers
++            # against. The link itself is still drawn between the two selements.
+             logger.debug(
+-                "Skipping edge because source/target host mapping is missing source_id=%s target_id=%s",
++                "Edge touches an unmatched/image node; drawing plain link without trigger "
++                "resolution source_id=%s target_id=%s",
+                 edge.source_id,
+                 edge.target_id,
+             )
+-            continue
++            host_pair_key = None
++            hostids = []
+ 
+-        pair = tuple(sorted((source_selementid, target_selementid)))
+-        host_pair_key = _normalize_host_pair(source_host.name or source_host.host, target_host.name or target_host.host)
+         pair_entry = edges_by_pair.setdefault(
+             pair,
+             {
+-                "hostids": [source_host.hostid, target_host.hostid],
++                "hostids": hostids,
+                 "host_pair_key": host_pair_key,
+                 "trigger_names": [],
+             },
+         )
+ 
+-        if pair_entry["host_pair_key"] != host_pair_key:
++        if host_pair_key is not None and pair_entry["host_pair_key"] != host_pair_key:
+             logger.debug(
+                 "Pair host key mismatch for pair=%s previous=%s current=%s",
+                 pair,
+@@ -412,45 +472,52 @@ def build_map_payload(
+         host_pair_key = edge_data["host_pair_key"]
+         hostids = edge_data["hostids"]
+         link_trigger_entries: list[dict] = []
+-        for trigger_name in edge_data["trigger_names"]:
+-            trigger_key = (host_pair_key[0], host_pair_key[1], trigger_name)
+-            trigger_id = trigger_cache.get(trigger_key)
+-            if trigger_key not in trigger_cache:
+-                logger.debug(
+-                    "Resolving link trigger host_pair=%s trigger_name=%s",
+-                    host_pair_key,
+-                    trigger_name,
+-                )
+-                trigger_id = zabbix.find_trigger_id(
+-                    hostids=hostids,
+-                    trigger_name=trigger_name,
+-                    match="auto",
+-                )
+-                trigger_cache[trigger_key] = trigger_id
+-
+-            if trigger_id:
++        if host_pair_key is None:
++            if edge_data["trigger_names"]:
+                 logger.debug(
+-                    "Matched link trigger host_pair=%s trigger_name=%s triggerid=%s",
+-                    host_pair_key,
+-                    trigger_name,
+-                    trigger_id,
+-                )
+-                link_trigger_entries.append(
+-                    {
+-                        "triggerid": trigger_id,
+-                        "drawtype": "0",
+-                        "color": "FF0000",
+-                    }
+-                )
+-            else:
+-                logger.warning(
+-                    "Could not match cable trigger from NetBox host_pair=%s trigger_name=%s",
+-                    host_pair_key,
+-                    trigger_name,
+-                )
+-                unresolved_rules.add(
+-                    (host_pair_key[0], host_pair_key[1], trigger_name)
++                    "Skipping trigger resolution for link pair=%s: endpoint has no matched Zabbix host",
++                    pair,
+                 )
++        else:
++            for trigger_name in edge_data["trigger_names"]:
++                trigger_key = (host_pair_key[0], host_pair_key[1], trigger_name)
++                trigger_id = trigger_cache.get(trigger_key)
++                if trigger_key not in trigger_cache:
++                    logger.debug(
++                        "Resolving link trigger host_pair=%s trigger_name=%s",
++                        host_pair_key,
++                        trigger_name,
++                    )
++                    trigger_id = zabbix.find_trigger_id(
++                        hostids=hostids,
++                        trigger_name=trigger_name,
++                        match="auto",
++                    )
++                    trigger_cache[trigger_key] = trigger_id
++
++                if trigger_id:
++                    logger.debug(
++                        "Matched link trigger host_pair=%s trigger_name=%s triggerid=%s",
++                        host_pair_key,
++                        trigger_name,
++                        trigger_id,
++                    )
++                    link_trigger_entries.append(
++                        {
++                            "triggerid": trigger_id,
++                            "drawtype": "0",
++                            "color": "FF0000",
++                        }
++                    )
++                else:
++                    logger.warning(
++                        "Could not match cable trigger from NetBox host_pair=%s trigger_name=%s",
++                        host_pair_key,
++                        trigger_name,
++                    )
++                    unresolved_rules.add(
++                        (host_pair_key[0], host_pair_key[1], trigger_name)
++                    )
+ 
+         existing_link = existing_links_by_pair.get(pair)
+         if link_trigger_entries:
+@@ -474,10 +541,20 @@ def build_map_payload(
+         "selements": selements,
+         "links": links,
+     }
++    if image_node_count > 0:
++        # By default Zabbix's map-wide label_type is "element name" (2), which
++        # host elements resolve to their hostname just fine, but image-type
++        # elements have no underlying host/name to resolve, so Zabbix falls
++        # back to showing the literal element type ("Image") instead of our
++        # static `label` text. Overriding just the image-element label mode
++        # to "label" (0) makes the NetBox device name actually render, without
++        # touching how host elements display their live name/status.
++        payload["label_type_image"] = "0"
+     logger.info(
+-        "Built map payload name=%s matched_hosts=%s links=%s unresolved_link_rules=%s",
++        "Built map payload name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",
+         map_name,
+-        len(selements),
++        matched_host_count,
++        image_node_count,
+         len(links),
+         len(unresolved_rules),
+     )
+@@ -485,7 +562,7 @@ def build_map_payload(
+         f"Cable trigger: {host_a} <-> {host_b} | trigger='{trigger_name}'"
+         for host_a, host_b, trigger_name in sorted(unresolved_rules)
+     )
+-    return payload, len(selements), len(links), len(unresolved_rules), unresolved_details
++    return payload, matched_host_count, image_node_count, len(links), len(unresolved_rules), unresolved_details
+ 
+ 
+ def sync_topology_to_zabbix_map(
+@@ -496,6 +573,8 @@ def sync_topology_to_zabbix_map(
+     height: int,
+     grid_x: int = GRID_STEP_X,
+     grid_y: int = GRID_STEP_Y,
++    skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
++    skipped_node_icon_id: str = "",
+ ) -> SyncResult:
+     topology_names = sorted({node.label for node in graph.nodes if node.label})
+     logger.debug("Syncing topology labels=%s", topology_names)
+@@ -503,7 +582,7 @@ def sync_topology_to_zabbix_map(
+ 
+     existing_map = zabbix.get_map_by_name(map_name)
+ 
+-    payload, matched_hosts, link_count, unresolved_link_rules, unresolved_details = build_map_payload(
++    payload, matched_hosts, image_nodes, link_count, unresolved_link_rules, unresolved_details = build_map_payload(
+         graph=graph,
+         hosts_by_name=hosts,
+         zabbix=zabbix,
+@@ -513,6 +592,8 @@ def sync_topology_to_zabbix_map(
+         grid_x=max(10, grid_x),
+         grid_y=max(10, grid_y),
+         existing_map=existing_map,
++        skipped_node_mode=skipped_node_mode,
++        skipped_node_icon_id=skipped_node_icon_id,
+     )
+ 
+     created = existing_map is None
+@@ -527,7 +608,8 @@ def sync_topology_to_zabbix_map(
+         map_name=map_name,
+         total_nodes=len(graph.nodes),
+         matched_hosts=matched_hosts,
+-        skipped_nodes=max(0, len(graph.nodes) - matched_hosts),
++        skipped_nodes=max(0, len(graph.nodes) - matched_hosts - image_nodes),
++        image_nodes=image_nodes,
+         total_links=link_count,
+         unresolved_link_rules=unresolved_link_rules,
+         unresolved_link_rule_details=unresolved_details,
+diff --git a/zabbix_map_sync/web.py b/zabbix_map_sync/web.py
+index ef6cc2d..876f2bf 100644
+--- a/zabbix_map_sync/web.py
++++ b/zabbix_map_sync/web.py
+@@ -26,6 +26,7 @@ def _sync_result_to_json(result: SyncResult) -> dict:
+         "map_name": result.map_name,
+         "total_nodes": result.total_nodes,
+         "matched_hosts": result.matched_hosts,
++        "image_nodes": result.image_nodes,
+         "skipped_nodes": result.skipped_nodes,
+         "total_links": result.total_links,
+         "unresolved_link_rules": result.unresolved_link_rules,

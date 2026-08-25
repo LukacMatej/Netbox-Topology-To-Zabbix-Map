@@ -541,6 +541,15 @@ def build_map_payload(
         "selements": selements,
         "links": links,
     }
+    if image_node_count > 0:
+        # By default Zabbix's map-wide label_type is "element name" (2), which
+        # host elements resolve to their hostname just fine, but image-type
+        # elements have no underlying host/name to resolve, so Zabbix falls
+        # back to showing the literal element type ("Image") instead of our
+        # static `label` text. Overriding just the image-element label mode
+        # to "label" (0) makes the NetBox device name actually render, without
+        # touching how host elements display their live name/status.
+        payload["label_type_image"] = "0"
     logger.info(
         "Built map payload name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",
         map_name,
