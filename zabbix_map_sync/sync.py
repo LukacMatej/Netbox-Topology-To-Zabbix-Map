@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass
 
 from .models import TopologyGraph, TopologyNode
@@ -84,99 +84,102 @@ def _connected_components(node_ids: list[str], adjacency: dict[str, set[str]]) -
     return components
 
 
-def _is_ring_component(component: list[str], adjacency: dict[str, set[str]]) -> tuple[bool, str]:
-    center = max(component, key=lambda node_id: len(adjacency.get(node_id, set())))
-    center_degree = len(adjacency.get(center, set()))
-    if center_degree < 2:
-        return False, center
-
-    leaf_count = 0
-    for node_id in component:
-        if node_id == center:
-            continue
-        neighbors = adjacency.get(node_id, set())
-        if len(neighbors) <= 1 and center in neighbors:
-            leaf_count += 1
-
-    non_center = max(1, len(component) - 1)
-    is_ring = leaf_count / non_center >= 0.6 or center_degree >= 3
-    return is_ring, center
-
-
-def _layout_component_ring(
+def _fruchterman_reingold_layout(
     component: list[str],
-    center: str,
     adjacency: dict[str, set[str]],
+    iterations: int = 120,
 ) -> tuple[dict[str, tuple[int, int]], int, int]:
-    first_ring = sorted(adjacency.get(center, set()) & set(component))
-    remaining = sorted(node_id for node_id in component if node_id != center and node_id not in first_ring)
+    """Force-directed layout for a single connected component.
 
-    ring1_radius = max(90, 36 * max(1, len(first_ring)))
-    ring2_radius = ring1_radius + 95 if remaining else ring1_radius
-    size = max(260, 2 * ring2_radius + 90)
+    Classic Fruchterman-Reingold: nodes repel each other, edges act as
+    springs pulling connected nodes together, and a cooling "temperature"
+    shrinks the max step size each iteration so the system settles instead
+    of oscillating. Initial positions are placed deterministically (sorted
+    node order around a circle, no RNG) so the same graph always produces
+    the same layout on re-sync.
+    """
+    n = len(component)
 
-    center_x = size // 2
-    center_y = size // 2
-    positions: dict[str, tuple[int, int]] = {center: (center_x, center_y)}
+    if n == 1:
+        size = 140
+        return {component[0]: (size // 2, size // 2)}, size, size
 
-    for idx, node_id in enumerate(first_ring):
-        angle = 2 * math.pi * idx / max(1, len(first_ring))
-        positions[node_id] = (
-            int(center_x + ring1_radius * math.cos(angle)),
-            int(center_y + ring1_radius * math.sin(angle)),
-        )
+    # Canvas the simulation runs in scales with node count so dense
+    # components get more breathing room without the whole map exploding.
+    side = max(220, int(70 * math.sqrt(n)))
+    width = height = side
+    area = float(width * height)
+    k = math.sqrt(area / n)  # ideal spring/edge length
 
-    for idx, node_id in enumerate(remaining):
-        angle = 2 * math.pi * idx / max(1, len(remaining))
-        positions[node_id] = (
-            int(center_x + ring2_radius * math.cos(angle)),
-            int(center_y + ring2_radius * math.sin(angle)),
-        )
+    ordered = sorted(component)
+    pos: dict[str, list[float]] = {}
+    cx, cy = width / 2, height / 2
+    radius = min(width, height) * 0.35
+    for idx, node_id in enumerate(ordered):
+        angle = 2 * math.pi * idx / n
+        pos[node_id] = [cx + radius * math.cos(angle), cy + radius * math.sin(angle)]
 
-    return positions, size, size
+    temperature = side / 10.0
+    cooling = temperature / max(1, iterations)
+    margin = 30.0
 
+    for _ in range(iterations):
+        disp: dict[str, list[float]] = {node_id: [0.0, 0.0] for node_id in component}
 
-def _layout_component_lanes(component: list[str], adjacency: dict[str, set[str]]) -> tuple[dict[str, tuple[int, int]], int, int]:
-    root = max(component, key=lambda node_id: len(adjacency.get(node_id, set())))
+        # Repulsion: every pair of nodes pushes apart (Coulomb-like force).
+        for i in range(n):
+            a = ordered[i]
+            ax, ay = pos[a]
+            for j in range(i + 1, n):
+                b = ordered[j]
+                bx, by = pos[b]
+                dx, dy = ax - bx, ay - by
+                dist = math.hypot(dx, dy) or 0.01
+                force = (k * k) / dist
+                fx, fy = (dx / dist) * force, (dy / dist) * force
+                disp[a][0] += fx
+                disp[a][1] += fy
+                disp[b][0] -= fx
+                disp[b][1] -= fy
 
-    level: dict[str, int] = {root: 0}
-    queue: deque[str] = deque([root])
-    while queue:
-        current = queue.popleft()
-        for neighbor in sorted(adjacency.get(current, set())):
-            if neighbor not in level:
-                level[neighbor] = level[current] + 1
-                queue.append(neighbor)
+        # Attraction: connected nodes pull together (Hooke-like spring).
+        seen_edges: set[tuple[str, str]] = set()
+        for node_id in component:
+            for neighbor in adjacency.get(node_id, set()):
+                if neighbor not in pos:
+                    continue
+                edge_key = tuple(sorted((node_id, neighbor)))
+                if edge_key in seen_edges:
+                    continue
+                seen_edges.add(edge_key)
+                a, b = edge_key
+                ax, ay = pos[a]
+                bx, by = pos[b]
+                dx, dy = ax - bx, ay - by
+                dist = math.hypot(dx, dy) or 0.01
+                force = (dist * dist) / k
+                fx, fy = (dx / dist) * force, (dy / dist) * force
+                disp[a][0] -= fx
+                disp[a][1] -= fy
+                disp[b][0] += fx
+                disp[b][1] += fy
 
-    for node_id in component:
-        level.setdefault(node_id, 0)
+        # Apply displacement capped by the current temperature, then clamp
+        # to the component's canvas so nodes never drift off it.
+        for node_id in component:
+            dx, dy = disp[node_id]
+            dist = math.hypot(dx, dy) or 0.01
+            capped = min(dist, temperature)
+            x, y = pos[node_id]
+            x += (dx / dist) * capped
+            y += (dy / dist) * capped
+            x = min(width - margin, max(margin, x))
+            y = min(height - margin, max(margin, y))
+            pos[node_id] = [x, y]
 
-    by_level: dict[int, list[str]] = defaultdict(list)
-    for node_id in component:
-        by_level[level[node_id]].append(node_id)
+        temperature = max(1.0, temperature - cooling)
 
-    for lvl_nodes in by_level.values():
-        lvl_nodes.sort(key=lambda node_id: (-len(adjacency.get(node_id, set())), node_id))
-
-    lane_x_gap = 230
-    lane_y_gap = 130
-    max_level = max(by_level)
-    max_nodes_level = max(len(nodes) for nodes in by_level.values())
-
-    width = max(340, (max_level + 1) * lane_x_gap + 120)
-    height = max(240, max_nodes_level * lane_y_gap + 120)
-
-    positions: dict[str, tuple[int, int]] = {}
-    for lvl in range(max_level + 1):
-        nodes_in_level = by_level.get(lvl, [])
-        if not nodes_in_level:
-            continue
-        x = 70 + lvl * lane_x_gap
-        stack_height = (len(nodes_in_level) - 1) * lane_y_gap
-        start_y = (height - stack_height) // 2
-        for idx, node_id in enumerate(nodes_in_level):
-            positions[node_id] = (x, start_y + idx * lane_y_gap)
-
+    positions = {node_id: (int(round(x)), int(round(y))) for node_id, (x, y) in pos.items()}
     return positions, width, height
 
 
@@ -247,11 +250,7 @@ def _layout_positions(
 
     positions: dict[str, tuple[int, int]] = {}
     for component in components:
-        is_ring, center = _is_ring_component(component, adjacency)
-        if is_ring:
-            local_positions, comp_width, comp_height = _layout_component_ring(component, center, adjacency)
-        else:
-            local_positions, comp_width, comp_height = _layout_component_lanes(component, adjacency)
+        local_positions, comp_width, comp_height = _fruchterman_reingold_layout(component, adjacency)
 
         if current_x + comp_width > width - padding and current_x > padding:
             current_x = padding
