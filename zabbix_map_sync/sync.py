@@ -87,7 +87,8 @@ def _connected_components(node_ids: list[str], adjacency: dict[str, set[str]]) -
 def _fruchterman_reingold_layout(
     component: list[str],
     adjacency: dict[str, set[str]],
-    iterations: int = 120,
+    iterations: int = 150,
+    target_area: float | None = None,
 ) -> tuple[dict[str, tuple[int, int]], int, int]:
     """Force-directed layout for a single connected component.
 
@@ -107,8 +108,12 @@ def _fruchterman_reingold_layout(
     # Canvas the simulation runs in scales with node count so dense
     # components get more breathing room without the whole map exploding.
     # The multiplier accounts for icon size plus the label drawn below each
-    # node -- too small a canvas and nodes/labels end up overlapping.
-    side = max(300, int(110 * math.sqrt(n)))
+    # node -- too small a canvas and nodes/labels end up overlapping. Large,
+    # heavily-meshed components additionally get a share of the overall map
+    # area (target_area, from _layout_positions) so they aren't squeezed
+    # into a small square while the rest of the canvas sits empty.
+    min_side = max(300, int(150 * math.sqrt(n)))
+    side = max(min_side, int(math.sqrt(target_area))) if target_area else min_side
     width = height = side
     area = float(width * height)
     k = math.sqrt(area / n)  # ideal spring/edge length
@@ -250,9 +255,23 @@ def _layout_positions(
     row_height = 0
     occupied_grid: set[tuple[int, int]] = set()
 
+    # Give each component a share of the whole map proportional to its node
+    # count, instead of only sizing it off its own node count. Without this,
+    # one big, densely-meshed component and a handful of single-node
+    # components each get a canvas sized the same way, so the big component
+    # ends up squeezed into a small square while most of the map sits empty.
+    total_nodes = sum(len(component) for component in components) or 1
+    available_area = float(max(1, width * height))
+    packing_efficiency = 0.6  # leaves room for padding/gaps between components
+    max_side = float(max(300, min(width, height) - 2 * padding))
+
     positions: dict[str, tuple[int, int]] = {}
     for component in components:
-        local_positions, comp_width, comp_height = _fruchterman_reingold_layout(component, adjacency)
+        share = len(component) / total_nodes
+        target_area = min(available_area * packing_efficiency * share, max_side * max_side)
+        local_positions, comp_width, comp_height = _fruchterman_reingold_layout(
+            component, adjacency, target_area=target_area
+        )
 
         if current_x + comp_width > width - padding and current_x > padding:
             current_x = padding
