@@ -196,6 +196,11 @@ def test_build_map_payload_renders_unmatched_nodes_as_images_when_enabled() -> N
     assert matched_hosts == 2
     assert image_nodes == 1
     assert len(payload["selements"]) == 3
+    # label_type_image is only honored by Zabbix when label_format=1; without
+    # it the override is silently ignored and images fall back to showing the
+    # literal element type ("Image") instead of the NetBox device name.
+    assert payload["label_format"] == "1"
+    assert payload["label_type_image"] == "0"
     # Both edges are now drawn since the image element gives the third node a selement.
     assert link_count == 2
 

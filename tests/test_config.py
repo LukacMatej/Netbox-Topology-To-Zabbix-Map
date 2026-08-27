@@ -39,7 +39,7 @@ def test_load_settings_with_token(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.netbox_url == "http://netbox.local"
     assert settings.netbox_topology_path == "/api/plugins/netbox_topology_views/xml-export/"
     assert settings.netbox_ignored_device_roles == ()
-    assert settings.zabbix_map_width == 1280
+    assert settings.zabbix_map_width == 1920
     assert settings.zabbix_layout_grid_x == 40
     assert settings.zabbix_skipped_node_mode == "skip"
     assert settings.zabbix_skipped_node_icon_id == ""

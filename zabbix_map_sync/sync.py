@@ -106,7 +106,9 @@ def _fruchterman_reingold_layout(
 
     # Canvas the simulation runs in scales with node count so dense
     # components get more breathing room without the whole map exploding.
-    side = max(220, int(70 * math.sqrt(n)))
+    # The multiplier accounts for icon size plus the label drawn below each
+    # node -- too small a canvas and nodes/labels end up overlapping.
+    side = max(300, int(110 * math.sqrt(n)))
     width = height = side
     area = float(width * height)
     k = math.sqrt(area / n)  # ideal spring/edge length
@@ -121,7 +123,7 @@ def _fruchterman_reingold_layout(
 
     temperature = side / 10.0
     cooling = temperature / max(1, iterations)
-    margin = 30.0
+    margin = 50.0
 
     for _ in range(iterations):
         disp: dict[str, list[float]] = {node_id: [0.0, 0.0] for node_id in component}
@@ -549,6 +551,13 @@ def build_map_payload(
         # static `label` text. Overriding just the image-element label mode
         # to "label" (0) makes the NetBox device name actually render, without
         # touching how host elements display their live name/status.
+        #
+        # Per-element-type label overrides (label_type_image and friends) are
+        # only honored by Zabbix when label_format=1 ("custom label format");
+        # with the default label_format=0 they're silently ignored and every
+        # element keeps following the map-wide label_type, which is exactly
+        # why images were still rendering the literal "Image" fallback.
+        payload["label_format"] = "1"
         payload["label_type_image"] = "0"
     logger.info(
         "Built map payload name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",

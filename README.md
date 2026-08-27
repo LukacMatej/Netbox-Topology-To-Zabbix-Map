@@ -11,9 +11,11 @@ Python CLI and optional webhook service that reads topology data from NetBox and
 - Imports topology from NetBox (including topology-views plugin XML export).
 - Matches NetBox device labels to Zabbix hosts.
 - Creates or updates one Zabbix map with nodes and links.
+- Lays out nodes automatically using a Fruchterman-Reingold force-directed algorithm.
 - Supports dry-run mode for safe validation.
 - Supports webhook/manual sync through a lightweight web server.
 - Supports link indicators from NetBox cable custom field trigger mapping.
+- Optionally splices out patch panel nodes, reconnecting the cables that pass through them.
 
 ## Requirements
 
@@ -108,11 +110,27 @@ Optional variables:
 - NETBOX_IGNORED_DEVICE_ROLES (comma-separated names/slugs)
 - ZABBIX_TOKEN (Bearer token auth)
 - ZABBIX_MAP_NAME (default: NetBox Topology)
-- ZABBIX_MAP_WIDTH (default: 1280)
-- ZABBIX_MAP_HEIGHT (default: 900)
+- ZABBIX_MAP_WIDTH (default: 1920)
+- ZABBIX_MAP_HEIGHT (default: 1200)
 - ZABBIX_LAYOUT_GRID_X (default: 40)
 - ZABBIX_LAYOUT_GRID_Y (default: 40)
+- ZABBIX_SKIPPED_NODE_MODE (default: skip; one of skip, image)
+- ZABBIX_SKIPPED_NODE_ICON_ID (icon ID used for image-mode skipped nodes; defaults to the built-in host icon)
 - LOG_LEVEL (default: DEBUG)
+
+### Skipped Node Mode
+
+Topology nodes that have no matching Zabbix host are, by default, left off the map (`skip`).
+Set `ZABBIX_SKIPPED_NODE_MODE=image` to render them as image elements labeled with their NetBox
+device name instead, optionally styled with `ZABBIX_SKIPPED_NODE_ICON_ID`.
+
+### Patch Panel Splicing
+
+Devices identified as patch panels by their NetBox label (e.g. containing "patch panel" or a
+"PP" token) are only removed from the topology when `patchpanel` is included in
+`NETBOX_IGNORED_DEVICE_ROLES`. When enabled, each patch panel node is spliced out and its two
+cables are reconnected directly between the devices on either side, so the map shows the
+effective link instead of the intermediate panel.
 
 ## Link Trigger Mapping
 

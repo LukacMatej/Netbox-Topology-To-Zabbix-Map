@@ -11,9 +11,11 @@ Python CLI aplikace a volitelna webhook sluzba, ktera nacita topologii z NetBoxu
 - Import topologie z NetBoxu (vcetne XML exportu z pluginu topology-views).
 - Mapovani popisku zarizeni z NetBoxu na hosty v Zabbixu.
 - Vytvoreni nebo aktualizace jedne mapy v Zabbixu se uzly a linkami.
+- Automaticke rozmisteni uzlu pomoci silove orientovaneho algoritmu Fruchterman-Reingold.
 - Podpora dry-run rezimu pro bezpecne otestovani.
 - Podpora webhook/manual sync pomoci jednoducheho web serveru.
 - Podpora indikatoru linek z trigger mapovani v custom fieldu kabelu v NetBoxu.
+- Volitelne vynechani patch panelu z topologie s prepojenim kabelu, ktere skrz ne prochazi.
 
 ## Pozadavky
 
@@ -108,11 +110,27 @@ Volitelne promenne:
 - NETBOX_IGNORED_DEVICE_ROLES (carkou oddelene nazvy/slugs)
 - ZABBIX_TOKEN (Bearer token autentizace)
 - ZABBIX_MAP_NAME (vychozi: NetBox Topology)
-- ZABBIX_MAP_WIDTH (vychozi: 1280)
-- ZABBIX_MAP_HEIGHT (vychozi: 900)
+- ZABBIX_MAP_WIDTH (vychozi: 1920)
+- ZABBIX_MAP_HEIGHT (vychozi: 1200)
 - ZABBIX_LAYOUT_GRID_X (vychozi: 40)
 - ZABBIX_LAYOUT_GRID_Y (vychozi: 40)
+- ZABBIX_SKIPPED_NODE_MODE (vychozi: skip; jedna z hodnot skip, image)
+- ZABBIX_SKIPPED_NODE_ICON_ID (ID ikony pro uzly v rezimu image; vychozi je vestavena ikona hostu)
 - LOG_LEVEL (vychozi: DEBUG)
+
+### Rezim vynechanych uzlu
+
+Uzly topologie bez odpovidajiciho hostu v Zabbixu se ve vychozim nastaveni na mape nezobrazi
+(`skip`). Nastavenim `ZABBIX_SKIPPED_NODE_MODE=image` se misto toho vykresli jako obrazkove
+prvky s popiskem podle nazvu zarizeni v NetBoxu, volitelne s ikonou dle `ZABBIX_SKIPPED_NODE_ICON_ID`.
+
+### Vynechavani patch panelu
+
+Zarizeni rozpoznana jako patch panely podle nazvu v NetBoxu (napr. obsahujici "patch panel" nebo
+token "PP") se z topologie odstrani pouze pokud je `patchpanel` uvedeno v
+`NETBOX_IGNORED_DEVICE_ROLES`. Pokud je tato volba zapnuta, kazdy patch panel se z topologie
+vyjme a jeho dva kabely se propoji primo mezi zarizenimi na obou stranach, takze mapa zobrazuje
+vysledne spojeni misto prostredniho panelu.
 
 ## Mapovani triggeru linek
 

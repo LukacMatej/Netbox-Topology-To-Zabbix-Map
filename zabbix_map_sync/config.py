@@ -65,8 +65,8 @@ def load_settings() -> Settings:
         zabbix_token=os.getenv("ZABBIX_TOKEN", "").strip(),
         zabbix_map_name=os.getenv("ZABBIX_MAP_NAME", "NetBox Topology").strip()
         or "NetBox Topology",
-        zabbix_map_width=int(os.getenv("ZABBIX_MAP_WIDTH", "1280")),
-        zabbix_map_height=int(os.getenv("ZABBIX_MAP_HEIGHT", "900")),
+        zabbix_map_width=int(os.getenv("ZABBIX_MAP_WIDTH", "1920")),
+        zabbix_map_height=int(os.getenv("ZABBIX_MAP_HEIGHT", "1200")),
         zabbix_layout_grid_x=int(os.getenv("ZABBIX_LAYOUT_GRID_X", "40")),
         zabbix_layout_grid_y=int(os.getenv("ZABBIX_LAYOUT_GRID_Y", "40")),
         zabbix_skipped_node_mode=os.getenv("ZABBIX_SKIPPED_NODE_MODE", "skip").strip().lower()
