@@ -273,7 +273,12 @@ def test_fetch_topology_xml_collapses_patch_panel_passthrough(monkeypatch: pytes
             headers={"Content-Type": "application/json"},
         )
 
-    client = NetBoxClient(base_url="http://netbox.local", token="token", required_tag="Zabbix Map")
+    client = NetBoxClient(
+        base_url="http://netbox.local",
+        token="token",
+        required_tag="Zabbix Map",
+        ignored_device_roles=("patch-panel",),
+    )
     monkeypatch.setattr(client.session, "get", fake_get)
 
     graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
@@ -282,6 +287,35 @@ def test_fetch_topology_xml_collapses_patch_panel_passthrough(monkeypatch: pytes
     assert sorted(node.label for node in graph.nodes) == ["Switch 1", "Switch 2"]
     assert len(graph.edges) == 1
     assert {graph.edges[0].source_id, graph.edges[0].target_id} == {"node_1", "node_3"}
+
+
+def test_fetch_topology_xml_keeps_patch_panel_label_when_role_not_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    xml_payload = """
+    <mxGraphModel>
+      <root>
+        <mxCell id='0'/>
+        <mxCell id='1'/>
+        <mxCell id='node_1' vertex='1' value='Switch 1'/>
+        <mxCell id='node_2' vertex='1' value='Patch Panel A'/>
+        <mxCell id='node_3' vertex='1' value='Switch 2'/>
+        <mxCell id='edge_1' edge='1' source='node_1' target='node_2'/>
+        <mxCell id='edge_2' edge='1' source='node_2' target='node_3'/>
+      </root>
+    </mxGraphModel>
+    """
+
+    def fake_get(url, params=None, timeout=30):
+        return FakeResponse(text=xml_payload, headers={"Content-Type": "application/xml"})
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
+
+    assert sorted(node.label for node in graph.nodes) == ["Patch Panel A", "Switch 1", "Switch 2"]
+    assert len(graph.edges) == 2
 
 
 def test_fetch_topology_xml_collapses_pp_abbreviation_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,7 +352,12 @@ def test_fetch_topology_xml_collapses_pp_abbreviation_passthrough(monkeypatch: p
             headers={"Content-Type": "application/json"},
         )
 
-    client = NetBoxClient(base_url="http://netbox.local", token="token", required_tag="Zabbix Map")
+    client = NetBoxClient(
+        base_url="http://netbox.local",
+        token="token",
+        required_tag="Zabbix Map",
+        ignored_device_roles=("patch-panel",),
+    )
     monkeypatch.setattr(client.session, "get", fake_get)
 
     graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")

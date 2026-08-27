@@ -651,11 +651,13 @@ class NetBoxClient:
             return graph
 
         node_by_id = {node.node_id: node for node in graph.nodes}
-        passthrough_ids = {
-            node.node_id
-            for node in graph.nodes
-            if _is_patch_panel_label(node.label)
-        }
+        passthrough_ids: set[str] = set()
+        if "patchpanel" in self.ignored_role_variants:
+            passthrough_ids = {
+                node.node_id
+                for node in graph.nodes
+                if _is_patch_panel_label(node.label)
+            }
 
         if self.ignored_role_variants:
             node_to_device: dict[str, str] = {}
