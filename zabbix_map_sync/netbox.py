@@ -360,7 +360,18 @@ class NetBoxClient:
         payload = {"custom_fields": {field_name: value}}
         logger.info("Updating NetBox cable custom field cable_id=%s field=%s", cable_id, field_name)
         response = self.session.patch(url, json=payload, timeout=self.timeout)
-        response.raise_for_status()
+        if not response.ok:
+            logger.error(
+                "NetBox rejected cable custom field update cable_id=%s field=%s status=%s body=%s",
+                cable_id,
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected update to cable_id={cable_id} field={field_name}: "
+                f"{response.status_code} {response.text}"
+            )
         return response.json()
 
     def fetch_topology(self, path: str, query: str = "") -> TopologyGraph:

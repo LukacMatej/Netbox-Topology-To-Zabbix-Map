@@ -12,10 +12,12 @@ from zabbix_map_sync.netbox import (
 
 
 class FakeResponse:
-    def __init__(self, *, text: str = "", json_data=None, headers=None) -> None:
+    def __init__(self, *, text: str = "", json_data=None, headers=None, status_code: int = 200, ok: bool = True) -> None:
         self.text = text
         self._json_data = json_data
         self.headers = headers or {}
+        self.status_code = status_code
+        self.ok = ok
 
     def raise_for_status(self) -> None:
         return None
@@ -490,3 +492,19 @@ def test_set_cable_custom_field_patches_cable(monkeypatch: pytest.MonkeyPatch) -
     assert captured["url"] == "http://netbox.local/api/dcim/cables/42/"
     assert captured["json"] == {"custom_fields": {"zabbix_triggers": ["Link down", "High CPU"]}}
     assert result["custom_fields"]["zabbix_triggers"] == ["Link down", "High CPU"]
+
+
+def test_set_cable_custom_field_raises_with_response_body_on_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+
+    def fake_patch(url, json=None, timeout=30):
+        return FakeResponse(
+            status_code=400,
+            ok=False,
+            text='{"custom_fields":{"zabbix_triggers":["Value must be one of the available choices."]}}',
+        )
+
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    with pytest.raises(ValueError, match="Value must be one of the available choices"):
+        client.set_cable_custom_field(42, "zabbix_triggers", ["Ping packet lost"])
