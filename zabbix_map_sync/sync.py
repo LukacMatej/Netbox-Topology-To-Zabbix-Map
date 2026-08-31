@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 from collections import deque
@@ -34,6 +35,30 @@ class SyncResult:
     total_links: int
     unresolved_link_rules: int
     unresolved_link_rule_details: tuple[str, ...]
+
+
+def _sanitize_linktrigger_entries(raw_entries) -> list[dict]:
+    # Entries fetched back from Zabbix's map.get (selectLinks="extend") carry
+    # read-only bookkeeping fields such as "linktriggerid"/"linkid" alongside
+    # the real ones. Feeding those straight back into map.create/map.update
+    # is what's actually accepted by some Zabbix versions but rejected by
+    # others as "Wrong fields for map link.", so only forward the fields a
+    # link trigger is ever written with.
+    sanitized: list[dict] = []
+    for entry in raw_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        triggerid = str(entry.get("triggerid", "")).strip()
+        if not triggerid:
+            continue
+        sanitized.append(
+            {
+                "triggerid": triggerid,
+                "drawtype": str(entry.get("drawtype", "0")),
+                "color": str(entry.get("color", "FF0000")),
+            }
+        )
+    return sanitized
 
 
 def _normalize_host_pair(host_a: str, host_b: str) -> tuple[str, str]:
@@ -546,9 +571,11 @@ def build_map_payload(
             link_payload["linktriggers"] = link_trigger_entries
             logger.debug("Added %s link trigger entries to map link pair=%s", len(link_trigger_entries), pair)
         elif existing_link and existing_link.get("linktriggers"):
-            link_payload["indicator_type"] = int(existing_link.get("indicator_type", 1))
-            link_payload["linktriggers"] = existing_link.get("linktriggers", [])
-            logger.debug("Preserved existing link triggers for pair=%s", pair)
+            sanitized_entries = _sanitize_linktrigger_entries(existing_link.get("linktriggers"))
+            if sanitized_entries:
+                link_payload["indicator_type"] = int(existing_link.get("indicator_type", 1))
+                link_payload["linktriggers"] = sanitized_entries
+                logger.debug("Preserved existing link triggers for pair=%s", pair)
 
         if existing_link and existing_link.get("linkid"):
             link_payload["linkid"] = str(existing_link["linkid"])
@@ -625,6 +652,8 @@ def sync_topology_to_zabbix_map(
     )
 
     created = existing_map is None
+
+    logger.debug("Outgoing map payload links=%s", json.dumps(payload.get("links"), default=str))
 
     if created:
         zabbix.create_map(payload)
