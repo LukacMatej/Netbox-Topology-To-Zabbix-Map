@@ -577,9 +577,10 @@ def build_map_payload(
                 link_payload["linktriggers"] = sanitized_entries
                 logger.debug("Preserved existing link triggers for pair=%s", pair)
 
-        if existing_link and existing_link.get("linkid"):
-            link_payload["linkid"] = str(existing_link["linkid"])
-
+        # Deliberately not echoing back existing_link["linkid"]: on map.update
+        # Zabbix replaces a map's whole link set from the selementid pairs in
+        # this payload, and treats "linkid" as read-only/output-only here --
+        # including it is what was causing "Wrong fields for map link.".
         links.append(link_payload)
 
     payload = {

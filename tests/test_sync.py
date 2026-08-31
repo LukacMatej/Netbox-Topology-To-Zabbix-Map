@@ -289,4 +289,5 @@ def test_sync_topology_updates_existing_map_and_preserves_ids() -> None:
     preserved_link = zbx.updated_payload["links"][0]
     assert preserved_link["linktriggers"] == [{"triggerid": "123", "drawtype": "0", "color": "FF0000"}]
     assert "linktriggerid" not in preserved_link["linktriggers"][0]
+    assert "linkid" not in preserved_link
 
