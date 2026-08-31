@@ -136,3 +136,16 @@ def test_render_trigger_picker_html_handles_no_available_triggers() -> None:
     body = render_trigger_picker_html(context)
 
     assert "No Zabbix triggers found" in body
+
+
+def test_render_trigger_picker_html_shows_saved_banner_when_requested() -> None:
+    context = CableTriggerContext(
+        cable_id="42",
+        device_a="Switch 1",
+        device_b="Switch 2",
+        selected_triggers=(),
+        available_triggers=(),
+    )
+
+    assert "Saved" not in render_trigger_picker_html(context, saved=False)
+    assert "Saved" in render_trigger_picker_html(context, saved=True)

@@ -94,7 +94,7 @@ def test_get_cable_triggers_page(monkeypatch) -> None:
     monkeypatch.setattr(
         web,
         "get_cable_trigger_page",
-        lambda settings, cable_id: f"<html>triggers for {cable_id}</html>",
+        lambda settings, cable_id, saved=False: f"<html>triggers for {cable_id} saved={saved}</html>",
     )
 
     app = web.create_app()
@@ -104,7 +104,26 @@ def test_get_cable_triggers_page(monkeypatch) -> None:
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert "triggers for 42" in body
+    assert "triggers for 42 saved=False" in body
+
+
+def test_get_cable_triggers_page_passes_saved_query_param(monkeypatch) -> None:
+    import zabbix_map_sync.web as web
+
+    monkeypatch.setattr(web, "load_settings", lambda: object())
+    monkeypatch.setattr(
+        web,
+        "get_cable_trigger_page",
+        lambda settings, cable_id, saved=False: f"<html>triggers for {cable_id} saved={saved}</html>",
+    )
+
+    app = web.create_app()
+    client = app.test_client()
+
+    response = client.get("/cables/42/triggers?saved=1")
+    body = response.get_data(as_text=True)
+
+    assert "triggers for 42 saved=True" in body
 
 
 def test_get_cable_triggers_page_error_handling(monkeypatch) -> None:
@@ -112,7 +131,7 @@ def test_get_cable_triggers_page_error_handling(monkeypatch) -> None:
 
     monkeypatch.setattr(web, "load_settings", lambda: object())
 
-    def raise_value_error(settings, cable_id):
+    def raise_value_error(settings, cable_id, saved=False):
         raise ValueError("no such cable")
 
     monkeypatch.setattr(web, "get_cable_trigger_page", raise_value_error)
@@ -148,6 +167,6 @@ def test_post_cable_triggers_saves_selection_and_redirects(monkeypatch) -> None:
     )
 
     assert response.status_code == 302
-    assert response.headers["Location"] == "/cables/42/triggers"
+    assert response.headers["Location"] == "/cables/42/triggers?saved=1"
     assert captured["cable_id"] == "42"
     assert captured["trigger_names"] == ["Link down", "High CPU"]

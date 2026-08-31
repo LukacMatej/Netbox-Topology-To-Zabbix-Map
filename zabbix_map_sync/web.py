@@ -11,6 +11,7 @@ from .logging_utils import configure_logging
 from .runner import run_synchronization
 from .sync import SyncResult
 from .trigger_picker import apply_cable_trigger_selection, get_cable_trigger_page
+from .ui import render_page
 from .zabbix import ZabbixAPIError
 
 
@@ -46,13 +47,22 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
-        return (
-            "<html><body><h1>Zabbix Map Sync</h1>"
-            "<p><a href='/sync'>Run manual synchronization</a></p>"
-            "<p><a href='/debug'>Debug info</a></p>"
-            "<p>Pick triggers for a specific link at /cables/&lt;cable_id&gt;/triggers</p>"
-            "</body></html>"
+        body = (
+            "<h1>Zabbix Map Sync</h1>"
+            "<p class='subtitle'>Sync NetBox topology into a Zabbix network map.</p>"
+            "<div class='card'>"
+            "<ul class='links'>"
+            "<li><a href='/sync'>Run manual synchronization</a></li>"
+            "<li><a href='/debug'>Debug info</a></li>"
+            "</ul>"
+            "</div>"
+            "<p class='subtitle' style='margin-top:1rem'>"
+            "Pick triggers for a specific link at <code>/cables/&lt;cable_id&gt;/triggers</code> &mdash; "
+            "or add a NetBox Custom Link on the Cable content type pointing here so it's one click "
+            "from the cable's own page."
+            "</p>"
         )
+        return render_page("Zabbix Map Sync", body)
 
     @app.get("/debug")
     def debug_info():
@@ -89,9 +99,10 @@ def create_app() -> Flask:
 
     @app.get("/cables/<cable_id>/triggers")
     def cable_triggers_page(cable_id):
+        saved = request.args.get("saved") == "1"
         try:
             settings = load_settings()
-            body = get_cable_trigger_page(settings, cable_id)
+            body = get_cable_trigger_page(settings, cable_id, saved=saved)
             return body, 200
         except (ConfigurationError, ZabbixAPIError, ValueError, requests.RequestException) as exc:
             logger.exception("Failed to load trigger picker cable_id=%s", cable_id)
@@ -106,7 +117,7 @@ def create_app() -> Flask:
         except (ConfigurationError, ValueError, requests.RequestException) as exc:
             logger.exception("Failed to save trigger selection cable_id=%s", cable_id)
             return jsonify({"status": "error", "message": str(exc)}), 500
-        return redirect(f"/cables/{cable_id}/triggers")
+        return redirect(f"/cables/{cable_id}/triggers?saved=1")
 
     @app.post("/webhook")
     def webhook_sync():
