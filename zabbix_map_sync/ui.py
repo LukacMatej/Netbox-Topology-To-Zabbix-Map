@@ -105,4 +105,6 @@ def render_page(title: str, body: str) -> str:
 
 
 def render_banner(text: str) -> str:
-    return f"<div class='banner'>{text}</div>"
+    import html
+
+    return f"<div class='banner'>{html.escape(text)}</div>"
