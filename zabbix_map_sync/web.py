@@ -4,12 +4,13 @@ import logging
 import os
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request
 
-from .config import ConfigurationError
+from .config import ConfigurationError, load_settings
 from .logging_utils import configure_logging
 from .runner import run_synchronization
 from .sync import SyncResult
+from .trigger_picker import apply_cable_trigger_selection, get_cable_trigger_page
 from .zabbix import ZabbixAPIError
 
 
@@ -49,6 +50,7 @@ def create_app() -> Flask:
             "<html><body><h1>Zabbix Map Sync</h1>"
             "<p><a href='/sync'>Run manual synchronization</a></p>"
             "<p><a href='/debug'>Debug info</a></p>"
+            "<p>Pick triggers for a specific link at /cables/&lt;cable_id&gt;/triggers</p>"
             "</body></html>"
         )
 
@@ -84,6 +86,27 @@ def create_app() -> Flask:
             print(f"[zbx-map-sync] /sync failed error={exc}", flush=True)
             logger.exception("Manual sync failed")
             return jsonify({"status": "error", "message": str(exc)}), 500
+
+    @app.get("/cables/<cable_id>/triggers")
+    def cable_triggers_page(cable_id):
+        try:
+            settings = load_settings()
+            body = get_cable_trigger_page(settings, cable_id)
+            return body, 200
+        except (ConfigurationError, ZabbixAPIError, ValueError, requests.RequestException) as exc:
+            logger.exception("Failed to load trigger picker cable_id=%s", cable_id)
+            return jsonify({"status": "error", "message": str(exc)}), 500
+
+    @app.post("/cables/<cable_id>/triggers")
+    def save_cable_triggers(cable_id):
+        trigger_names = request.form.getlist("trigger")
+        try:
+            settings = load_settings()
+            apply_cable_trigger_selection(settings, cable_id, trigger_names)
+        except (ConfigurationError, ValueError, requests.RequestException) as exc:
+            logger.exception("Failed to save trigger selection cable_id=%s", cable_id)
+            return jsonify({"status": "error", "message": str(exc)}), 500
+        return redirect(f"/cables/{cable_id}/triggers")
 
     @app.post("/webhook")
     def webhook_sync():

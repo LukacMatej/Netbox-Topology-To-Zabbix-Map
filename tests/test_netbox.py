@@ -430,3 +430,63 @@ def test_fetch_topology_xml_collapses_role_based_passthrough(monkeypatch: pytest
     assert sorted(node.label for node in graph.nodes) == ["Switch 1", "lib-sw-01"]
     assert len(graph.edges) == 1
     assert {graph.edges[0].source_id, graph.edges[0].target_id} == {"node_1", "node_11"}
+
+
+def test_get_cable_fetches_single_cable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+
+    def fake_get(url, timeout=30, params=None):
+        assert url == "http://netbox.local/api/dcim/cables/42/"
+        return FakeResponse(json_data={"id": 42, "custom_fields": {"zabbix_triggers": ["Link down"]}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    cable = client.get_cable(42)
+
+    assert cable["id"] == 42
+    assert client.get_cable_trigger_names(cable) == ("Link down",)
+
+
+def test_resolve_cable_device_pair_uses_inline_termination_ids() -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    cable = {
+        "a_terminations": [{"object": {"device": {"id": 2}}}],
+        "b_terminations": [{"object": {"device": {"id": 1}}}],
+    }
+
+    assert client.resolve_cable_device_pair(cable) == ("1", "2")
+
+
+def test_resolve_cable_device_pair_falls_back_to_termination_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    cable = {
+        "a_terminations": [{"object": {"url": "http://netbox.local/api/dcim/interfaces/1/"}}],
+        "b_terminations": [{"object": {"url": "http://netbox.local/api/dcim/interfaces/2/"}}],
+    }
+
+    def fake_get(url, timeout=30, params=None):
+        if url.endswith("interfaces/1/"):
+            return FakeResponse(json_data={"device": {"id": 5}})
+        return FakeResponse(json_data={"device": {"id": 6}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    assert client.resolve_cable_device_pair(cable) == ("5", "6")
+
+
+def test_set_cable_custom_field_patches_cable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    captured = {}
+
+    def fake_patch(url, json=None, timeout=30):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse(json_data={"id": 42, "custom_fields": json["custom_fields"]})
+
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    result = client.set_cable_custom_field(42, "zabbix_triggers", ["Link down", "High CPU"])
+
+    assert captured["url"] == "http://netbox.local/api/dcim/cables/42/"
+    assert captured["json"] == {"custom_fields": {"zabbix_triggers": ["Link down", "High CPU"]}}
+    assert result["custom_fields"]["zabbix_triggers"] == ["Link down", "High CPU"]
