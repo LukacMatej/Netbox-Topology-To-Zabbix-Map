@@ -508,3 +508,76 @@ def test_set_cable_custom_field_raises_with_response_body_on_rejection(monkeypat
 
     with pytest.raises(ValueError, match="Value must be one of the available choices"):
         client.set_cable_custom_field(42, "zabbix_triggers", ["Ping packet lost"])
+
+
+def test_fetch_topology_xml_batches_cable_detail_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    xml_payload = """
+    <mxGraphModel>
+      <root>
+        <mxCell id='0'/>
+        <mxCell id='1'/>
+        <mxCell id='node_1' vertex='1' value='node_1'/>
+        <mxCell id='node_2' vertex='1' value='node_2'/>
+        <mxCell id='node_3' vertex='1' value='node_3'/>
+        <mxCell id='edge_1' edge='1' source='node_1' target='node_2'/>
+        <mxCell id='edge_2' edge='1' source='node_2' target='node_3'/>
+      </root>
+    </mxGraphModel>
+    """
+
+    calls = {"count": 0}
+    detail_fetch_urls: list[str] = []
+
+    def fake_get(url, params=None, timeout=30):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return FakeResponse(text=xml_payload, headers={"Content-Type": "application/xml"})
+        if calls["count"] == 2:
+            return FakeResponse(
+                json_data={
+                    "results": [
+                        {"id": 1, "name": "Switch 1"},
+                        {"id": 2, "name": "Switch 2"},
+                        {"id": 3, "name": "Switch 3"},
+                    ]
+                },
+                headers={"Content-Type": "application/json"},
+            )
+        if calls["count"] == 3:
+            # Bulk cable list is missing custom_fields/terminations for every
+            # cable, e.g. because this NetBox's list serializer omits them.
+            return FakeResponse(
+                json_data={"results": [{"id": 55}, {"id": 56}]},
+                headers={"Content-Type": "application/json"},
+            )
+
+        detail_fetch_urls.append(url)
+        return FakeResponse(
+            json_data={
+                "results": [
+                    {
+                        "id": 55,
+                        "custom_fields": {"zabbix_triggers": ["trigger1"]},
+                        "a_terminations": [{"device": {"id": 1}}],
+                        "b_terminations": [{"device": {"id": 2}}],
+                    },
+                    {
+                        "id": 56,
+                        "custom_fields": {"zabbix_triggers": ["trigger2"]},
+                        "a_terminations": [{"device": {"id": 2}}],
+                        "b_terminations": [{"device": {"id": 3}}],
+                    },
+                ]
+            },
+            headers={"Content-Type": "application/json"},
+        )
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
+
+    # One bulk request for both cables missing detail, not one per cable.
+    assert len(detail_fetch_urls) == 1
+    assert calls["count"] == 4
+    assert {edge.trigger_names for edge in graph.edges} == {("trigger1",), ("trigger2",)}
