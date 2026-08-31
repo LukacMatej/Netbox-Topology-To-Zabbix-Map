@@ -654,7 +654,8 @@ def sync_topology_to_zabbix_map(
 
     created = existing_map is None
 
-    logger.debug("Outgoing map payload links=%s", json.dumps(payload.get("links"), default=str))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Outgoing map payload links=%s", json.dumps(payload.get("links"), default=str))
 
     if created:
         zabbix.create_map(payload)
