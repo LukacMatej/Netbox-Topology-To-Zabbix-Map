@@ -92,11 +92,14 @@ _STYLE = """
 
 
 def render_page(title: str, body: str) -> str:
+    import html
+
+    safe_title = html.escape(title)
     return (
         "<!doctype html><html><head>"
         "<meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-        f"<title>{title}</title>"
+        f"<title>{safe_title}</title>"
         f"{_STYLE}"
         "</head><body><div class='page'>"
         f"{body}"
