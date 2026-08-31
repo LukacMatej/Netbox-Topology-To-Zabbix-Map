@@ -12,10 +12,12 @@ from zabbix_map_sync.netbox import (
 
 
 class FakeResponse:
-    def __init__(self, *, text: str = "", json_data=None, headers=None) -> None:
+    def __init__(self, *, text: str = "", json_data=None, headers=None, status_code: int = 200, ok: bool = True) -> None:
         self.text = text
         self._json_data = json_data
         self.headers = headers or {}
+        self.status_code = status_code
+        self.ok = ok
 
     def raise_for_status(self) -> None:
         return None
@@ -430,3 +432,152 @@ def test_fetch_topology_xml_collapses_role_based_passthrough(monkeypatch: pytest
     assert sorted(node.label for node in graph.nodes) == ["Switch 1", "lib-sw-01"]
     assert len(graph.edges) == 1
     assert {graph.edges[0].source_id, graph.edges[0].target_id} == {"node_1", "node_11"}
+
+
+def test_get_cable_fetches_single_cable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+
+    def fake_get(url, timeout=30, params=None):
+        assert url == "http://netbox.local/api/dcim/cables/42/"
+        return FakeResponse(json_data={"id": 42, "custom_fields": {"zabbix_triggers": ["Link down"]}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    cable = client.get_cable(42)
+
+    assert cable["id"] == 42
+    assert client.get_cable_trigger_names(cable) == ("Link down",)
+
+
+def test_resolve_cable_device_pair_uses_inline_termination_ids() -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    cable = {
+        "a_terminations": [{"object": {"device": {"id": 2}}}],
+        "b_terminations": [{"object": {"device": {"id": 1}}}],
+    }
+
+    assert client.resolve_cable_device_pair(cable) == ("1", "2")
+
+
+def test_resolve_cable_device_pair_falls_back_to_termination_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    cable = {
+        "a_terminations": [{"object": {"url": "http://netbox.local/api/dcim/interfaces/1/"}}],
+        "b_terminations": [{"object": {"url": "http://netbox.local/api/dcim/interfaces/2/"}}],
+    }
+
+    def fake_get(url, timeout=30, params=None):
+        if url.endswith("interfaces/1/"):
+            return FakeResponse(json_data={"device": {"id": 5}})
+        return FakeResponse(json_data={"device": {"id": 6}})
+
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    assert client.resolve_cable_device_pair(cable) == ("5", "6")
+
+
+def test_set_cable_custom_field_patches_cable(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    captured = {}
+
+    def fake_patch(url, json=None, timeout=30):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse(json_data={"id": 42, "custom_fields": json["custom_fields"]})
+
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    result = client.set_cable_custom_field(42, "zabbix_triggers", ["Link down", "High CPU"])
+
+    assert captured["url"] == "http://netbox.local/api/dcim/cables/42/"
+    assert captured["json"] == {"custom_fields": {"zabbix_triggers": ["Link down", "High CPU"]}}
+    assert result["custom_fields"]["zabbix_triggers"] == ["Link down", "High CPU"]
+
+
+def test_set_cable_custom_field_raises_with_response_body_on_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+
+    def fake_patch(url, json=None, timeout=30):
+        return FakeResponse(
+            status_code=400,
+            ok=False,
+            text='{"custom_fields":{"zabbix_triggers":["Value must be one of the available choices."]}}',
+        )
+
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    with pytest.raises(ValueError, match="Value must be one of the available choices"):
+        client.set_cable_custom_field(42, "zabbix_triggers", ["Ping packet lost"])
+
+
+def test_fetch_topology_xml_batches_cable_detail_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    xml_payload = """
+    <mxGraphModel>
+      <root>
+        <mxCell id='0'/>
+        <mxCell id='1'/>
+        <mxCell id='node_1' vertex='1' value='node_1'/>
+        <mxCell id='node_2' vertex='1' value='node_2'/>
+        <mxCell id='node_3' vertex='1' value='node_3'/>
+        <mxCell id='edge_1' edge='1' source='node_1' target='node_2'/>
+        <mxCell id='edge_2' edge='1' source='node_2' target='node_3'/>
+      </root>
+    </mxGraphModel>
+    """
+
+    calls = {"count": 0}
+    detail_fetch_urls: list[str] = []
+
+    def fake_get(url, params=None, timeout=30):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return FakeResponse(text=xml_payload, headers={"Content-Type": "application/xml"})
+        if calls["count"] == 2:
+            return FakeResponse(
+                json_data={
+                    "results": [
+                        {"id": 1, "name": "Switch 1"},
+                        {"id": 2, "name": "Switch 2"},
+                        {"id": 3, "name": "Switch 3"},
+                    ]
+                },
+                headers={"Content-Type": "application/json"},
+            )
+        if calls["count"] == 3:
+            # Bulk cable list is missing custom_fields/terminations for every
+            # cable, e.g. because this NetBox's list serializer omits them.
+            return FakeResponse(
+                json_data={"results": [{"id": 55}, {"id": 56}]},
+                headers={"Content-Type": "application/json"},
+            )
+
+        detail_fetch_urls.append(url)
+        return FakeResponse(
+            json_data={
+                "results": [
+                    {
+                        "id": 55,
+                        "custom_fields": {"zabbix_triggers": ["trigger1"]},
+                        "a_terminations": [{"device": {"id": 1}}],
+                        "b_terminations": [{"device": {"id": 2}}],
+                    },
+                    {
+                        "id": 56,
+                        "custom_fields": {"zabbix_triggers": ["trigger2"]},
+                        "a_terminations": [{"device": {"id": 2}}],
+                        "b_terminations": [{"device": {"id": 3}}],
+                    },
+                ]
+            },
+            headers={"Content-Type": "application/json"},
+        )
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", fake_get)
+
+    graph = client.fetch_topology("/api/plugins/netbox_topology_views/xml-export", "")
+
+    # One bulk request for both cables missing detail, not one per cable.
+    assert len(detail_fetch_urls) == 1
+    assert calls["count"] == 4
+    assert {edge.trigger_names for edge in graph.edges} == {("trigger1",), ("trigger2",)}

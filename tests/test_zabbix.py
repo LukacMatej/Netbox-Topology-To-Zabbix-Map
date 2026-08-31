@@ -106,3 +106,28 @@ def test_find_trigger_id_exact_and_contains(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert trigger_id == "555"
     assert calls["count"] == 2
+
+
+def test_list_triggers_for_hosts_returns_rpc_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+
+    captured = {}
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        captured["method"] = method
+        captured["params"] = params
+        return [{"triggerid": "555", "description": "Link down"}]
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    triggers = client.list_triggers_for_hosts(["10", "20"])
+
+    assert triggers == [{"triggerid": "555", "description": "Link down"}]
+    assert captured["method"] == "trigger.get"
+    assert captured["params"]["hostids"] == ["10", "20"]
+
+
+def test_list_triggers_for_hosts_skips_rpc_without_hostids() -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+
+    assert client.list_triggers_for_hosts([]) == []

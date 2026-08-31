@@ -31,10 +31,19 @@ class FakeZabbix:
                 "links": [
                     {
                         "linkid": "99",
+                        "sysmapid": "42",
                         "selementid1": "11",
                         "selementid2": "12",
                         "indicator_type": "1",
-                        "linktriggers": [{"triggerid": "123", "drawtype": "0", "color": "FF0000"}],
+                        "linktriggers": [
+                            {
+                                "linktriggerid": "5001",
+                                "linkid": "99",
+                                "triggerid": "123",
+                                "drawtype": "0",
+                                "color": "FF0000",
+                            }
+                        ],
                     }
                 ],
             }
@@ -276,4 +285,9 @@ def test_sync_topology_updates_existing_map_and_preserves_ids() -> None:
     assert zbx.updated_payload is not None
     selement_ids = sorted(item["selementid"] for item in zbx.updated_payload["selements"])
     assert selement_ids == ["11", "12"]
+
+    preserved_link = zbx.updated_payload["links"][0]
+    assert preserved_link["linktriggers"] == [{"triggerid": "123", "drawtype": "0", "color": "FF0000"}]
+    assert "linktriggerid" not in preserved_link["linktriggers"][0]
+    assert "linkid" not in preserved_link
 

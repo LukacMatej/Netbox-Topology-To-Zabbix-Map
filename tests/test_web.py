@@ -85,3 +85,88 @@ def test_endpoint_error_handling(monkeypatch) -> None:
     assert response.status_code == 500
     assert payload["status"] == "error"
     assert payload["message"] == "boom"
+
+
+def test_get_cable_triggers_page(monkeypatch) -> None:
+    import zabbix_map_sync.web as web
+
+    monkeypatch.setattr(web, "load_settings", lambda: object())
+    monkeypatch.setattr(
+        web,
+        "get_cable_trigger_page",
+        lambda settings, cable_id, saved=False: f"<html>triggers for {cable_id} saved={saved}</html>",
+    )
+
+    app = web.create_app()
+    client = app.test_client()
+
+    response = client.get("/cables/42/triggers")
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "triggers for 42 saved=False" in body
+
+
+def test_get_cable_triggers_page_passes_saved_query_param(monkeypatch) -> None:
+    import zabbix_map_sync.web as web
+
+    monkeypatch.setattr(web, "load_settings", lambda: object())
+    monkeypatch.setattr(
+        web,
+        "get_cable_trigger_page",
+        lambda settings, cable_id, saved=False: f"<html>triggers for {cable_id} saved={saved}</html>",
+    )
+
+    app = web.create_app()
+    client = app.test_client()
+
+    response = client.get("/cables/42/triggers?saved=1")
+    body = response.get_data(as_text=True)
+
+    assert "triggers for 42 saved=True" in body
+
+
+def test_get_cable_triggers_page_error_handling(monkeypatch) -> None:
+    import zabbix_map_sync.web as web
+
+    monkeypatch.setattr(web, "load_settings", lambda: object())
+
+    def raise_value_error(settings, cable_id, saved=False):
+        raise ValueError("no such cable")
+
+    monkeypatch.setattr(web, "get_cable_trigger_page", raise_value_error)
+
+    app = web.create_app()
+    client = app.test_client()
+
+    response = client.get("/cables/42/triggers")
+    payload = response.get_json()
+
+    assert response.status_code == 500
+    assert payload["message"] == "no such cable"
+
+
+def test_post_cable_triggers_saves_selection_and_redirects(monkeypatch) -> None:
+    import zabbix_map_sync.web as web
+
+    captured = {}
+    monkeypatch.setattr(web, "load_settings", lambda: object())
+
+    def fake_apply(settings, cable_id, trigger_names):
+        captured["cable_id"] = cable_id
+        captured["trigger_names"] = trigger_names
+
+    monkeypatch.setattr(web, "apply_cable_trigger_selection", fake_apply)
+
+    app = web.create_app()
+    client = app.test_client()
+
+    response = client.post(
+        "/cables/42/triggers",
+        data={"trigger": ["Link down", "High CPU"]},
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/cables/42/triggers?saved=1"
+    assert captured["cable_id"] == "42"
+    assert captured["trigger_names"] == ["Link down", "High CPU"]

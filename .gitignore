@@ -3,3 +3,6 @@ init.sh
 nblab-root-ca.crt
 poznamky.txt
 .env
+__pycache__/
+*.pyc
+.pytest_cache/

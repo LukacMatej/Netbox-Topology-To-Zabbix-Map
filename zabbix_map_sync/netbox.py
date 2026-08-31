@@ -172,6 +172,28 @@ def _extract_cable_device_pair(cable: dict) -> tuple[str, str] | None:
     return None
 
 
+def _extract_cable_trigger_names(cable: dict) -> tuple[str, ...]:
+    custom_fields = cable.get("custom_fields") if isinstance(cable.get("custom_fields"), dict) else {}
+    candidates = [
+        cable.get("zabbix_triggers"),
+        custom_fields.get("zabbix_triggers"),
+        custom_fields.get("zabbix-trigger"),
+        custom_fields.get("zabbixTrigger"),
+        custom_fields.get("triggers"),
+    ]
+
+    for key, value in custom_fields.items():
+        lowered = str(key).lower()
+        if "trigger" in lowered and "zabbix" in lowered:
+            candidates.append(value)
+
+    for candidate in candidates:
+        trigger_names = _normalize_trigger_names(candidate)
+        if trigger_names:
+            return trigger_names
+    return ()
+
+
 def _extract_termination_url(value) -> str:
     if isinstance(value, list):
         for item in value:
@@ -278,6 +300,102 @@ class NetBoxClient:
             if device_id:
                 by_id[device_id] = item
         return by_id
+
+    def _fetch_cables_by_ids(self, cable_ids: set[str]) -> dict[str, dict]:
+        if not cable_ids:
+            return {}
+
+        params: list[tuple[str, str | int]] = [("limit", 0)]
+        for cable_id in sorted(cable_ids):
+            params.append(("id", cable_id))
+
+        cables_url = urljoin(f"{self.base_url}/", "api/dcim/cables/")
+        logger.debug("Batch-fetching cable details count=%s", len(cable_ids))
+        response = self.session.get(cables_url, params=params, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+
+        by_id: dict[str, dict] = {}
+        for item in payload.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            cable_id = str(item.get("id", "")).strip()
+            if cable_id:
+                by_id[cable_id] = item
+        return by_id
+
+    def fetch_devices_by_ids(self, device_ids: set[str]) -> dict[str, dict]:
+        return self._fetch_devices_by_ids(device_ids)
+
+    def get_cable(self, cable_id: str | int) -> dict:
+        url = urljoin(f"{self.base_url}/", f"api/dcim/cables/{cable_id}/")
+        logger.debug("Fetching NetBox cable url=%s", url)
+        response = self.session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected NetBox cable response for cable_id={cable_id}")
+        return payload
+
+    def get_cable_trigger_names(self, cable: dict) -> tuple[str, ...]:
+        return _extract_cable_trigger_names(cable)
+
+    def resolve_device_id_from_termination_url(self, url: str) -> str:
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            return ""
+        try:
+            logger.debug("Resolving termination endpoint url=%s", normalized_url)
+            response = self.session.get(normalized_url, timeout=self.timeout)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logger.debug("Could not resolve endpoint url=%s error=%s", normalized_url, exc)
+            return ""
+
+        device_id = _extract_device_id_from_termination(payload)
+        if not device_id and isinstance(payload, dict):
+            nested_device = payload.get("device")
+            if isinstance(nested_device, dict):
+                device_id = str(nested_device.get("id", "")).strip()
+        return device_id
+
+    def resolve_cable_device_pair(self, cable: dict) -> tuple[str, str] | None:
+        direct_pair = _extract_cable_device_pair(cable)
+        if direct_pair:
+            return direct_pair
+
+        side_a_term = cable.get("a_terminations") or cable.get("termination_a") or cable.get("a")
+        side_b_term = cable.get("b_terminations") or cable.get("termination_b") or cable.get("b")
+        side_a_url = _extract_termination_url(side_a_term)
+        side_b_url = _extract_termination_url(side_b_term)
+        if not side_a_url or not side_b_url:
+            return None
+
+        side_a_device = self.resolve_device_id_from_termination_url(side_a_url)
+        side_b_device = self.resolve_device_id_from_termination_url(side_b_url)
+        if side_a_device and side_b_device:
+            return tuple(sorted((side_a_device, side_b_device)))
+        return None
+
+    def set_cable_custom_field(self, cable_id: str | int, field_name: str, value) -> dict:
+        url = urljoin(f"{self.base_url}/", f"api/dcim/cables/{cable_id}/")
+        payload = {"custom_fields": {field_name: value}}
+        logger.info("Updating NetBox cable custom field cable_id=%s field=%s", cable_id, field_name)
+        response = self.session.patch(url, json=payload, timeout=self.timeout)
+        if not response.ok:
+            logger.error(
+                "NetBox rejected cable custom field update cable_id=%s field=%s status=%s body=%s",
+                cable_id,
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected update to cable_id={cable_id} field={field_name}: "
+                f"{response.status_code} {response.text}"
+            )
+        return response.json()
 
     def fetch_topology(self, path: str, query: str = "") -> TopologyGraph:
         path = path if path.startswith("/") else f"/{path}"
@@ -459,7 +577,26 @@ class NetBoxClient:
         relevant_device_ids = set(node_to_device.values())
         triggers_by_device_pair: dict[tuple[str, str], list[str]] = {}
         endpoint_device_cache: dict[str, str] = {}
-        cable_detail_cache: dict[str, dict] = {}
+
+        cable_ids_needing_detail: set[str] = set()
+        for cable in cable_results:
+            needs_detail_fetch = not any(
+                key in cable
+                for key in ("custom_fields", "a_terminations", "b_terminations", "termination_a", "termination_b")
+            )
+            if needs_detail_fetch:
+                cable_id = str(cable.get("id", "")).strip()
+                if cable_id:
+                    cable_ids_needing_detail.add(cable_id)
+
+        if cable_ids_needing_detail:
+            logger.debug(
+                "%s of %s cables are missing custom_fields/terminations in the list response; "
+                "fetching them in one batched request instead of one-by-one",
+                len(cable_ids_needing_detail),
+                len(cable_results),
+            )
+        cable_details_by_id = self._fetch_cables_by_ids(cable_ids_needing_detail)
 
         def resolve_device_id_from_endpoint_url(endpoint_url: str) -> str:
             normalized_url = endpoint_url.strip()
@@ -518,59 +655,13 @@ class NetBoxClient:
             return None
 
         def resolve_cable_details(cable: dict) -> dict:
-            cable_url = str(cable.get("url", "")).strip()
-            if not cable_url:
-                return cable
-            if cable_url in cable_detail_cache:
-                return cable_detail_cache[cable_url]
-
-            needs_detail_fetch = not any(
-                key in cable
-                for key in ("custom_fields", "a_terminations", "b_terminations", "termination_a", "termination_b")
-            )
-            if not needs_detail_fetch:
-                cable_detail_cache[cable_url] = cable
-                return cable
-
-            try:
-                logger.debug("Fetching cable details url=%s", cable_url)
-                detail_response = self.session.get(cable_url, timeout=self.timeout)
-                detail_response.raise_for_status()
-                detail_payload = detail_response.json()
-                if isinstance(detail_payload, dict):
-                    cable_detail_cache[cable_url] = detail_payload
-                    return detail_payload
-            except Exception as exc:
-                logger.debug("Could not fetch cable details url=%s error=%s", cable_url, exc)
-
-            cable_detail_cache[cable_url] = cable
-            return cable
-
-        def extract_cable_trigger_names(cable: dict) -> tuple[str, ...]:
-            custom_fields = cable.get("custom_fields") if isinstance(cable.get("custom_fields"), dict) else {}
-            candidates = [
-                cable.get("zabbix_triggers"),
-                custom_fields.get("zabbix_triggers"),
-                custom_fields.get("zabbix-trigger"),
-                custom_fields.get("zabbixTrigger"),
-                custom_fields.get("triggers"),
-            ]
-
-            for key, value in custom_fields.items():
-                lowered = str(key).lower()
-                if "trigger" in lowered and "zabbix" in lowered:
-                    candidates.append(value)
-
-            for candidate in candidates:
-                trigger_names = _normalize_trigger_names(candidate)
-                if trigger_names:
-                    return trigger_names
-            return ()
+            cable_id = str(cable.get("id", "")).strip()
+            return cable_details_by_id.get(cable_id, cable)
 
         for cable in cable_results:
             cable = resolve_cable_details(cable)
 
-            trigger_names = extract_cable_trigger_names(cable)
+            trigger_names = _extract_cable_trigger_names(cable)
             if not trigger_names:
                 custom_fields = cable.get("custom_fields")
                 logger.debug(

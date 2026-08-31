@@ -185,6 +185,21 @@ class ZabbixClient:
         logger.debug("No Zabbix trigger matched trigger_name=%s hostids=%s", trigger_name, hostids)
         return None
 
+    def list_triggers_for_hosts(self, hostids: list[str]) -> list[dict]:
+        if not hostids:
+            return []
+
+        logger.debug("Listing Zabbix triggers for hostids=%s", hostids)
+        return self._rpc(
+            "trigger.get",
+            {
+                "output": ["triggerid", "description", "priority"],
+                "hostids": hostids,
+                "sortfield": "description",
+                "sortorder": "ASC",
+            },
+        )
+
     def create_map(self, payload: dict) -> dict:
         logger.info(
             "Creating Zabbix map name=%s selements=%s links=%s",
