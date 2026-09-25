@@ -10,11 +10,13 @@ from xml.etree import ElementTree as ET
 
 import requests
 
-from .models import TopologyEdge, TopologyGraph, TopologyNode
+from .models import DevicePositionRecord, TopologyEdge, TopologyGraph, TopologyNode
 
 
 logger = logging.getLogger(__name__)
 ENRICHMENT_MARKER = "cable-detail-v2"
+DEFAULT_POSITION_FIELD = "zabbix_map_coordinates"
+DEVICE_NAME_FETCH_CHUNK_SIZE = 100
 
 
 def _is_patch_panel_label(label: str) -> bool:
@@ -90,6 +92,40 @@ def _normalize_trigger_names(value) -> tuple[str, ...]:
     if items:
         logger.debug("Normalized trigger names raw=%r normalized=%s", value, items)
     return tuple(items)
+
+
+def _normalize_positions_by_map(value) -> dict[str, dict]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Could not parse stored device position JSON value=%r", value)
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_position_entry(entry) -> tuple[int, int] | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return int(entry["x"]), int(entry["y"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Malformed stored device position entry=%r", entry)
+        return None
+
+
+def positions_for_map(
+    records: dict[str, DevicePositionRecord], map_name: str
+) -> dict[str, tuple[int, int]]:
+    positions: dict[str, tuple[int, int]] = {}
+    for device_name, record in records.items():
+        xy = _coerce_position_entry(record.positions_by_map.get(map_name))
+        if xy is not None:
+            positions[device_name] = xy
+    return positions
 
 
 def _extract_edge_trigger_names(edge: dict) -> tuple[str, ...]:
@@ -396,6 +432,83 @@ class NetBoxClient:
                 f"{response.status_code} {response.text}"
             )
         return response.json()
+
+    def fetch_device_position_records(
+        self, device_names: list[str], field_name: str = DEFAULT_POSITION_FIELD
+    ) -> dict[str, DevicePositionRecord]:
+        unique_names = sorted({name.strip() for name in device_names if name and name.strip()})
+        if not unique_names:
+            return {}
+
+        devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
+        records: dict[str, DevicePositionRecord] = {}
+
+        for start in range(0, len(unique_names), DEVICE_NAME_FETCH_CHUNK_SIZE):
+            chunk = unique_names[start : start + DEVICE_NAME_FETCH_CHUNK_SIZE]
+            params: list[tuple[str, str | int]] = [("limit", 0)]
+            for name in chunk:
+                params.append(("name", name))
+
+            logger.debug("Batch-fetching device positions count=%s", len(chunk))
+            response = self.session.get(devices_url, params=params, timeout=self.timeout)
+            response.raise_for_status()
+            payload = response.json()
+
+            for item in payload.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                device_name = str(item.get("name", "")).strip()
+                device_id = str(item.get("id", "")).strip()
+                if not device_name or not device_id:
+                    continue
+                custom_fields = item.get("custom_fields") if isinstance(item.get("custom_fields"), dict) else {}
+                positions_by_map = _normalize_positions_by_map(custom_fields.get(field_name))
+                records[device_name] = DevicePositionRecord(
+                    device_id=device_id, positions_by_map=positions_by_map
+                )
+
+        logger.debug("Fetched device position records count=%s", len(records))
+        return records
+
+    def set_device_custom_field(self, device_id: str | int, field_name: str, value) -> dict:
+        url = urljoin(f"{self.base_url}/", f"api/dcim/devices/{device_id}/")
+        payload = {"custom_fields": {field_name: value}}
+        logger.info("Updating NetBox device custom field device_id=%s field=%s", device_id, field_name)
+        response = self.session.patch(url, json=payload, timeout=self.timeout)
+        if not response.ok:
+            logger.error(
+                "NetBox rejected device custom field update device_id=%s field=%s status=%s body=%s",
+                device_id,
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected update to device_id={device_id} field={field_name}: "
+                f"{response.status_code} {response.text}"
+            )
+        return response.json()
+
+    def set_device_custom_fields_bulk(
+        self, updates: list[tuple[str, dict]], field_name: str = DEFAULT_POSITION_FIELD
+    ) -> None:
+        if not updates:
+            return
+
+        devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
+        body = [{"id": device_id, "custom_fields": {field_name: value}} for device_id, value in updates]
+        logger.info("Bulk-updating NetBox device custom field field=%s count=%s", field_name, len(body))
+        response = self.session.patch(devices_url, json=body, timeout=self.timeout)
+        if not response.ok:
+            logger.error(
+                "NetBox rejected bulk device custom field update field=%s status=%s body=%s",
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected bulk update field={field_name}: {response.status_code} {response.text}"
+            )
 
     def fetch_topology(self, path: str, query: str = "") -> TopologyGraph:
         path = path if path.startswith("/") else f"/{path}"

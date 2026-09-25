@@ -1,13 +1,16 @@
 import pytest
 
-from zabbix_map_sync.models import TopologyGraph
+from zabbix_map_sync.models import DevicePositionRecord, TopologyGraph
 from zabbix_map_sync.netbox import (
     NetBoxClient,
     _clean_xml_label,
+    _coerce_position_entry,
     _merge_query_defaults,
+    _normalize_positions_by_map,
     _parse_topology_json,
     _parse_topology_xml,
     _tag_variants,
+    positions_for_map,
 )
 
 

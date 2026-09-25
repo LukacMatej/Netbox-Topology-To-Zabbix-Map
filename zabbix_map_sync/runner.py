@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
-from zabbix_map_sync.models import TopologyGraph
-from zabbix_map_sync.sync import SyncResult
-
-from .config import Settings, load_settings
+from .config import load_map_definitions, load_settings
+from .models import DryRunResult, MapDefinition, MapSyncError, Settings, SyncResult, TopologyGraph
 from .netbox import NetBoxClient
 from .sync import sync_topology_to_zabbix_map
 from .zabbix import ZabbixClient
@@ -15,44 +12,70 @@ from .zabbix import ZabbixClient
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class DryRunResult:
-    total_nodes: int
-    total_links: int
-
-
-def run_synchronization(dry_run: bool = False) -> SyncResult | DryRunResult:
-    settings: Settings = load_settings()
-    print(
-        "[zbx-map-sync] synchronization start "
-        f"dry_run={dry_run} path={settings.netbox_topology_path} map={settings.zabbix_map_name}",
-        flush=True,
-    )
+def _sync_one_map(
+    settings: Settings,
+    map_def: MapDefinition,
+    zabbix: ZabbixClient,
+    dry_run: bool,
+) -> SyncResult | DryRunResult:
     logger.info(
-        "Starting synchronization dry_run=%s topology_path=%s required_tag=%s ignored_roles=%s map_name=%s",
+        "Starting synchronization for map=%s dry_run=%s topology_path=%s required_tag=%s ignored_roles=%s",
+        map_def.name,
         dry_run,
-        settings.netbox_topology_path,
-        settings.netbox_required_tag or "<none>",
-        ",".join(settings.netbox_ignored_device_roles) or "<none>",
-        settings.zabbix_map_name,
+        map_def.topology_path,
+        map_def.required_tag or "<none>",
+        ",".join(map_def.ignored_device_roles) or "<none>",
     )
 
     netbox = NetBoxClient(
         base_url=settings.netbox_url,
         token=settings.netbox_token,
-        required_tag=settings.netbox_required_tag,
-        ignored_device_roles=settings.netbox_ignored_device_roles,
+        required_tag=map_def.required_tag,
+        ignored_device_roles=map_def.ignored_device_roles,
     )
     topology: TopologyGraph = netbox.fetch_topology(
-        path=settings.netbox_topology_path,
-        query=settings.netbox_topology_query,
+        path=map_def.topology_path,
+        query=map_def.topology_query,
     )
     logger.info(
-        "Fetched topology nodes=%s edges=%s",
+        "Fetched topology for map=%s nodes=%s edges=%s",
+        map_def.name,
         len(topology.nodes),
         len(topology.edges),
     )
 
+    if dry_run:
+        logger.info("Dry-run completed without applying map changes map=%s", map_def.name)
+        return DryRunResult(
+            map_name=map_def.name,
+            total_nodes=len(topology.nodes),
+            total_links=len(topology.edges),
+        )
+
+    result = sync_topology_to_zabbix_map(
+        graph=topology,
+        zabbix=zabbix,
+        netbox=netbox,
+        map_name=map_def.name,
+        width=map_def.width,
+        height=map_def.height,
+        grid_x=map_def.grid_x,
+        grid_y=map_def.grid_y,
+        skipped_node_mode=map_def.skipped_node_mode,
+        skipped_node_icon_id=map_def.skipped_node_icon_id,
+    )
+    logger.info(
+        "Synchronization finished map=%s created=%s matched_hosts=%s total_links=%s unresolved_link_rules=%s",
+        map_def.name,
+        result.created,
+        result.matched_hosts,
+        result.total_links,
+        result.unresolved_link_rules,
+    )
+    return result
+
+
+def _zabbix_client(settings: Settings) -> ZabbixClient:
     zabbix = ZabbixClient(
         api_url=settings.zabbix_url,
         user=settings.zabbix_user,
@@ -61,37 +84,39 @@ def run_synchronization(dry_run: bool = False) -> SyncResult | DryRunResult:
     )
     zabbix.login()
     logger.debug("Authenticated to Zabbix API")
+    return zabbix
 
-    if dry_run:
-        logger.info("Dry-run completed without applying map changes")
-        print(
-            f"[zbx-map-sync] dry-run done nodes={len(topology.nodes)} edges={len(topology.edges)}",
-            flush=True,
-        )
-        return DryRunResult(total_nodes=len(topology.nodes), total_links=len(topology.edges))
 
-    result = sync_topology_to_zabbix_map(
-        graph=topology,
-        zabbix=zabbix,
-        map_name=settings.zabbix_map_name,
-        width=settings.zabbix_map_width,
-        height=settings.zabbix_map_height,
-        grid_x=settings.zabbix_layout_grid_x,
-        grid_y=settings.zabbix_layout_grid_y,
-        skipped_node_mode=settings.zabbix_skipped_node_mode,
-        skipped_node_icon_id=settings.zabbix_skipped_node_icon_id,
-    )
-    logger.info(
-        "Synchronization finished created=%s matched_hosts=%s total_links=%s unresolved_link_rules=%s",
-        result.created,
-        result.matched_hosts,
-        result.total_links,
-        result.unresolved_link_rules,
-    )
+def sync_maps(
+    settings: Settings,
+    map_definitions: list[MapDefinition],
+    dry_run: bool = False,
+) -> list[SyncResult | DryRunResult | MapSyncError]:
     print(
-        "[zbx-map-sync] synchronization done "
-        f"created={result.created} matched_hosts={result.matched_hosts} "
-        f"links={result.total_links} unresolved={result.unresolved_link_rules}",
+        "[zbx-map-sync] synchronization start "
+        f"dry_run={dry_run} maps={[m.name for m in map_definitions]}",
         flush=True,
     )
-    return result
+    zabbix = _zabbix_client(settings)
+
+    results: list[SyncResult | DryRunResult | MapSyncError] = []
+    for map_def in map_definitions:
+        try:
+            results.append(_sync_one_map(settings, map_def, zabbix, dry_run))
+        except Exception as exc:
+            logger.exception("Sync failed for map=%s", map_def.name)
+            print(f"[zbx-map-sync] map={map_def.name} failed error={exc}", flush=True)
+            results.append(MapSyncError(map_name=map_def.name, error=str(exc)))
+
+    print(
+        "[zbx-map-sync] synchronization done "
+        f"maps={len(results)} failed={sum(1 for r in results if isinstance(r, MapSyncError))}",
+        flush=True,
+    )
+    return results
+
+
+def run_synchronization(dry_run: bool = False) -> list[SyncResult | DryRunResult | MapSyncError]:
+    """Sync every configured map (saved maps, or the env-defined map when none are saved)."""
+    settings: Settings = load_settings()
+    return sync_maps(settings, load_map_definitions(settings), dry_run=dry_run)

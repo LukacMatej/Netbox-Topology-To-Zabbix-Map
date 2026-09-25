@@ -2,6 +2,7 @@ import itertools
 
 import pytest
 
+from zabbix_map_sync.models import ZabbixMap
 from zabbix_map_sync.zabbix import ZabbixAPIError, ZabbixClient
 
 
@@ -131,3 +132,35 @@ def test_list_triggers_for_hosts_skips_rpc_without_hostids() -> None:
     client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
 
     assert client.list_triggers_for_hosts([]) == []
+
+
+def test_get_map_by_name_returns_zabbix_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        assert method == "map.get"
+        return [{"sysmapid": "42", "name": "Core", "width": "800", "height": "600", "selements": [], "links": []}]
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    zabbix_map = client.get_map_by_name("Core")
+
+    assert isinstance(zabbix_map, ZabbixMap)
+    assert zabbix_map.sysmapid == "42"
+
+
+def test_update_map_sends_serialized_map_with_sysmapid(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+    calls = []
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        calls.append((method, params))
+        return {"sysmapids": ["42"]}
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    client.update_map("42", ZabbixMap(name="Core", width=800, height=600))
+
+    method, params = calls[0]
+    assert method == "map.update"
+    assert params == {"sysmapid": "42", "name": "Core", "width": "800", "height": "600", "selements": [], "links": []}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Link triggers &ndash; {{ context.device_a }} / {{ context.device_b }}{% endblock %}
+{% block page_class %}narrow{% endblock %}
+{% block content %}
+<h1>Link triggers</h1>
+<p class="subtitle">{{ context.device_a }} &harr; {{ context.device_b }}</p>
+{% if saved %}<div class="banner">Saved.</div>{% endif %}
+<form method="post" action="/cables/{{ context.cable_id }}/triggers">
+  <div class="card">
+    <div class="trigger-list">
+      {% for choice in context.available_triggers %}
+      <label class="trigger">
+        <input type="checkbox" name="trigger" value="{{ choice.description }}"{% if choice.description in context.selected_triggers %} checked{% endif %}>
+        <span>{{ choice.description }}</span>
+      </label>
+      {% else %}
+      <p class="empty">No Zabbix triggers found for these two hosts.</p>
+      {% endfor %}
+    </div>
+    <button type="submit">Save</button>
+  </div>
+</form>
+{% endblock %}

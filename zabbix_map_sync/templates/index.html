@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Zabbix Map Sync</h1>
+<p class="subtitle">Create Zabbix network maps from NetBox topology views. Saved maps are re-synced by <code>/sync</code> and <code>/webhook</code>.</p>
+
+{% if config_error %}
+<div class="banner error">Configuration error: {{ config_error }}</div>
+{% else %}
+<div class="card">
+  <h2>Connection</h2>
+  <dl class="connection">
+    <dt>NetBox</dt><dd>{{ connection.netbox_url }}</dd>
+    <dt>Zabbix</dt><dd>{{ connection.zabbix_url }}</dd>
+    <dt>Zabbix auth</dt><dd>{{ connection.zabbix_auth }}</dd>
+    <dt>Maps file</dt><dd><code>{{ connection.maps_config }}</code></dd>
+  </dl>
+</div>
+
+{% include "partials/map_form.html" %}
+
+<div id="result"></div>
+
+{% include "partials/maps_list.html" %}
+
+<p class="subtitle">
+  Pick triggers for a specific link at <code>/cables/&lt;cable_id&gt;/triggers</code> &mdash; or add a NetBox
+  Custom Link on the Cable content type pointing there. Debug info: <a href="/debug">/debug</a>.
+</p>
+{% endif %}
+{% endblock %}

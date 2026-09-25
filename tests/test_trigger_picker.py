@@ -1,11 +1,8 @@
+from zabbix_map_sync.models import TriggerChoice, ZabbixHost
 from zabbix_map_sync.trigger_picker import (
-    CableTriggerContext,
-    TriggerChoice,
     load_cable_trigger_context,
-    render_trigger_picker_html,
     save_cable_trigger_selection,
 )
-from zabbix_map_sync.zabbix import ZabbixHost
 
 
 class FakeNetBoxClient:
@@ -102,50 +99,3 @@ def test_save_cable_trigger_selection_strips_blank_entries() -> None:
     save_cable_trigger_selection(netbox, "42", ["Link down", "  ", "High CPU"])
 
     assert netbox.saved == ("42", "zabbix_triggers", ["Link down", "High CPU"])
-
-
-def test_render_trigger_picker_html_marks_selected_and_escapes() -> None:
-    context = CableTriggerContext(
-        cable_id="42",
-        device_a="Switch <1>",
-        device_b="Switch 2",
-        selected_triggers=("Link down",),
-        available_triggers=(
-            TriggerChoice(triggerid="555", description="Link down"),
-            TriggerChoice(triggerid="556", description="High CPU"),
-        ),
-    )
-
-    body = render_trigger_picker_html(context)
-
-    assert "Switch &lt;1&gt;" in body
-    assert "value=\"Link down\" checked" in body
-    assert "value=\"High CPU\">" in body
-    assert "/cables/42/triggers" in body
-
-
-def test_render_trigger_picker_html_handles_no_available_triggers() -> None:
-    context = CableTriggerContext(
-        cable_id="42",
-        device_a="Switch 1",
-        device_b="Switch 2",
-        selected_triggers=(),
-        available_triggers=(),
-    )
-
-    body = render_trigger_picker_html(context)
-
-    assert "No Zabbix triggers found" in body
-
-
-def test_render_trigger_picker_html_shows_saved_banner_when_requested() -> None:
-    context = CableTriggerContext(
-        cable_id="42",
-        device_a="Switch 1",
-        device_b="Switch 2",
-        selected_triggers=(),
-        available_triggers=(),
-    )
-
-    assert "Saved" not in render_trigger_picker_html(context, saved=False)
-    assert "Saved" in render_trigger_picker_html(context, saved=True)

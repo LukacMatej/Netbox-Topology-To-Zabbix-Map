@@ -1,0 +1,32 @@
+<div id="maps-list" class="card"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <h2>Saved maps</h2>
+  {% if saved_maps %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Filter query</th><th>Tag</th><th>Ignored roles</th><th>Size</th><th></th></tr></thead>
+      <tbody>
+        {% for m in saved_maps %}
+        <tr>
+          <td>{{ m.name }}</td>
+          <td>{% if m.topology_query %}<code>{{ m.topology_query }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+          <td>{{ m.required_tag or "—" }}</td>
+          <td>{{ m.ignored_device_roles | join(", ") or "—" }}</td>
+          <td class="num">{{ m.width }}&times;{{ m.height }}</td>
+          <td class="row-actions">
+            <button class="small" hx-post="/maps/sync" hx-vals='{{ {"name": m.name} | tojson }}' hx-target="#result" hx-disabled-elt="this">Sync</button>
+            <button class="small secondary" hx-get="/maps/form" hx-vals='{{ {"name": m.name} | tojson }}' hx-target="#map-form" hx-swap="outerHTML">Edit</button>
+            <button class="small danger" hx-post="/maps/delete" hx-vals='{{ {"name": m.name} | tojson }}' hx-target="#maps-list" hx-swap="outerHTML"
+                    hx-confirm="Remove &ldquo;{{ m.name }}&rdquo; from saved maps? The map in Zabbix is not deleted.">Delete</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="actions">
+    <button class="secondary" hx-post="/maps/sync" hx-target="#result" hx-disabled-elt="this">Sync all saved maps</button>
+  </div>
+  {% else %}
+  <p class="empty">No saved maps yet &mdash; <code>/sync</code> and <code>/webhook</code> sync the env-defined map &ldquo;{{ env_map_name }}&rdquo;.</p>
+  {% endif %}
+</div>

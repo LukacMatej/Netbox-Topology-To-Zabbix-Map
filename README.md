@@ -4,16 +4,16 @@ Language:
 [![English](https://img.shields.io/badge/English-active-0a7ea4)](README.md)
 [![Cesky](https://img.shields.io/badge/Cesky-switch-cf2e2e)](README.cs.md)
 
-Python CLI and optional webhook service that reads topology data from NetBox and creates or updates a Zabbix map.
+Web service (FastAPI + htmx) that reads topology data from NetBox and creates or updates Zabbix maps.
 
 ## Features
 
 - Imports topology from NetBox (including topology-views plugin XML export).
 - Matches NetBox device labels to Zabbix hosts.
-- Creates or updates one Zabbix map with nodes and links.
+- Creates and updates multiple Zabbix maps, each with its own NetBox topology filter, from a web form.
 - Lays out nodes automatically using a Fruchterman-Reingold force-directed algorithm.
-- Supports dry-run mode for safe validation.
-- Supports webhook/manual sync through a lightweight web server.
+- Dry-run preview of a map before it is written to Zabbix.
+- Re-syncs all saved maps on webhook or manual trigger.
 - Supports link indicators from NetBox cable custom field trigger mapping.
 - Optionally splices out patch panel nodes, reconnecting the cables that pass through them.
 
@@ -41,17 +41,14 @@ export ZABBIX_USER="Admin"
 export ZABBIX_PASSWORD="zabbix"
 ```
 
-3. Test without writing changes:
+3. Start the web server:
 
 ```bash
-zbx-map-sync --dry-run
+zbx-map-sync --host 0.0.0.0 --port 8080
 ```
 
-4. Apply changes:
-
-```bash
-zbx-map-sync
-```
+4. Open `http://<host>:8080/`, fill in the map form (pre-filled from the environment variables) and use
+   **Preview (dry-run)** or **Save & sync map**.
 
 ## Docker
 
@@ -61,16 +58,10 @@ The GitHub workflow publishes images to Docker Hub using this repository name:
 matejlukac/netbox-topology-zabbix-map
 ```
 
-Pull and run:
+Pull and run (maps created in the UI are stored in `/data/maps.json`, keep them on a volume):
 
 ```bash
-docker run --rm --env-file .env matejlukac/netbox-topology-zabbix-map:latest
-```
-
-Dry-run in Docker:
-
-```bash
-docker run --rm --env-file .env matejlukac/netbox-topology-zabbix-map:latest --dry-run
+docker run -d -p 7010:7010 --env-file .env -v zbx-map-sync-data:/data matejlukac/netbox-topology-zabbix-map:latest
 ```
 
 Build locally:
@@ -79,19 +70,35 @@ Build locally:
 docker build -t netbox-topology-zabbix-map:local .
 ```
 
-## Web Mode
+## Web UI and Endpoints
 
-Start HTTP mode:
+`zbx-map-sync` always starts the web server (`--host`, `--port`, `--log-level`).
 
-```bash
-zbx-map-sync --serve --host 0.0.0.0 --port 8080
+The index page shows the NetBox/Zabbix connection (secrets are never displayed), a form for a new map
+whose fields default to the environment variables below, and the list of saved maps with Sync / Edit /
+Delete actions. The topology filter query is passed to the NetBox topology-views export, so any filter
+the plugin supports (e.g. `site_id=1&role_id=3&tag=core`) produces a separate map.
+
+- GET / : web UI
+- POST /maps : save a map definition and sync it to Zabbix
+- POST /maps/preview : dry-run a map definition (nothing is saved or written to Zabbix)
+- POST /maps/sync : sync one saved map (`name` form field) or all of them
+- POST /maps/delete : remove a saved map definition (the Zabbix map itself is kept)
+- GET /sync : sync all maps, JSON result
+- POST /webhook : webhook trigger, syncs all maps, JSON result
+- GET/POST /cables/<cable_id>/triggers : link trigger picker for a cable
+
+### Saved maps
+
+Map definitions are stored in the JSON file given by `ZABBIX_MAPS_CONFIG` (default `maps.json` in the
+working directory, `/data/maps.json` in Docker):
+
+```json
+{"maps": [{"name": "Core", "topology_query": "site_id=1", "ignored_device_roles": ["patchpanel"]}]}
 ```
 
-Endpoints:
-
-- GET / : simple page with a manual sync link
-- GET /sync : manual synchronization trigger
-- POST /webhook : webhook synchronization trigger
+Fields missing from an entry fall back to the environment defaults. `/sync` and `/webhook` sync every saved
+map; while no map is saved, they sync the single map defined by the environment variables.
 
 ## Configuration
 
@@ -102,7 +109,7 @@ Required variables:
 - ZABBIX_URL
 - ZABBIX_USER and ZABBIX_PASSWORD, or ZABBIX_TOKEN
 
-Optional variables:
+Optional variables (map-level ones are the defaults of the web form):
 
 - NETBOX_TOPOLOGY_PATH (default: /api/plugins/netbox_topology_views/xml-export/)
 - NETBOX_TOPOLOGY_QUERY (default: show_unconnected=True&show_cables=True&limit=0)
@@ -116,6 +123,7 @@ Optional variables:
 - ZABBIX_LAYOUT_GRID_Y (default: 40)
 - ZABBIX_SKIPPED_NODE_MODE (default: skip; one of skip, image)
 - ZABBIX_SKIPPED_NODE_ICON_ID (icon ID used for image-mode skipped nodes; defaults to the built-in host icon)
+- ZABBIX_MAPS_CONFIG (default: maps.json; file with saved map definitions)
 - LOG_LEVEL (default: DEBUG)
 
 ### Skipped Node Mode

@@ -1,6 +1,14 @@
 import pytest
 
-from zabbix_map_sync.config import ConfigurationError, load_settings
+from zabbix_map_sync.config import (
+    ConfigurationError,
+    default_map_definition,
+    delete_map_definition,
+    load_map_definitions,
+    load_settings,
+    parse_map_definition,
+    save_map_definition,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +31,7 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "ZABBIX_LAYOUT_GRID_Y",
         "ZABBIX_SKIPPED_NODE_MODE",
         "ZABBIX_SKIPPED_NODE_ICON_ID",
+        "ZABBIX_MAPS_CONFIG",
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
@@ -112,3 +121,66 @@ def test_load_settings_requires_zabbix_auth(monkeypatch: pytest.MonkeyPatch) -> 
 
     with pytest.raises(ConfigurationError, match="ZABBIX_TOKEN"):
         load_settings()
+
+
+def _base_env(monkeypatch: pytest.MonkeyPatch, maps_path) -> None:
+    monkeypatch.setenv("NETBOX_URL", "http://netbox.local")
+    monkeypatch.setenv("NETBOX_TOKEN", "nb-token")
+    monkeypatch.setenv("ZABBIX_URL", "http://zabbix.local/api_jsonrpc.php")
+    monkeypatch.setenv("ZABBIX_TOKEN", "zbx-token")
+    monkeypatch.setenv("ZABBIX_MAP_NAME", "Env Map")
+    monkeypatch.setenv("ZABBIX_MAPS_CONFIG", str(maps_path))
+
+
+def test_load_map_definitions_falls_back_to_env_map_without_saved_maps(monkeypatch, tmp_path) -> None:
+    _base_env(monkeypatch, tmp_path / "missing.json")
+
+    definitions = load_map_definitions(load_settings())
+
+    assert [d.name for d in definitions] == ["Env Map"]
+
+
+def test_save_and_delete_map_definitions_round_trip(monkeypatch, tmp_path) -> None:
+    maps_path = tmp_path / "nested" / "maps.json"
+    _base_env(monkeypatch, maps_path)
+    settings = load_settings()
+    defaults = default_map_definition(settings)
+
+    save_map_definition(settings, parse_map_definition({"name": "A", "topology_query": "site_id=1"}, defaults))
+    save_map_definition(settings, parse_map_definition({"name": "B", "topology_query": ""}, defaults))
+    # Same name again replaces in place rather than appending.
+    save_map_definition(settings, parse_map_definition({"name": "A", "topology_query": "site_id=2"}, defaults))
+
+    definitions = load_map_definitions(settings)
+    assert [(d.name, d.topology_query) for d in definitions] == [("A", "site_id=2"), ("B", "")]
+    assert definitions[0].width == defaults.width
+
+    assert delete_map_definition(settings, "A") is True
+    assert delete_map_definition(settings, "A") is False
+    assert [d.name for d in load_map_definitions(settings)] == ["B"]
+
+
+def test_parse_map_definition_validates_fields(monkeypatch, tmp_path) -> None:
+    _base_env(monkeypatch, tmp_path / "maps.json")
+    defaults = default_map_definition(load_settings())
+
+    parsed = parse_map_definition(
+        {"name": "A", "topology_query": "", "ignored_device_roles": "patchpanel, ,server", "width": ""},
+        defaults,
+    )
+    assert parsed.ignored_device_roles == ("patchpanel", "server")
+    assert parsed.width == defaults.width
+
+    with pytest.raises(ConfigurationError, match="skipped_node_mode"):
+        parse_map_definition({"name": "A", "topology_query": "", "skipped_node_mode": "hide"}, defaults)
+    with pytest.raises(ConfigurationError, match="requires"):
+        parse_map_definition({"name": " ", "topology_query": ""}, defaults)
+
+
+def test_load_map_definitions_rejects_invalid_file(monkeypatch, tmp_path) -> None:
+    maps_path = tmp_path / "maps.json"
+    maps_path.write_text('{"not_maps": []}')
+    _base_env(monkeypatch, maps_path)
+
+    with pytest.raises(ConfigurationError, match="\"maps\" array"):
+        load_map_definitions(load_settings())

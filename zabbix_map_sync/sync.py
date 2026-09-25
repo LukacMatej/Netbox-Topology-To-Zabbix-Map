@@ -4,18 +4,25 @@ import json
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass
 
-from .models import TopologyGraph, TopologyNode
+from .models import (
+    ELEMENT_TYPE_HOST,
+    ELEMENT_TYPE_IMAGE,
+    DevicePositionRecord,
+    MapElement,
+    MapLink,
+    MapLinkTrigger,
+    SyncResult,
+    TopologyGraph,
+    TopologyNode,
+    ZabbixMap,
+)
+from .netbox import DEFAULT_POSITION_FIELD, NetBoxClient, positions_for_map
 from .zabbix import ZabbixClient
 
 DEFAULT_HOST_ICON_ID = "155"
 GRID_STEP_X = 40
 GRID_STEP_Y = 40
-
-# Zabbix sysmap selement "elementtype" values
-ELEMENT_TYPE_HOST = 0
-ELEMENT_TYPE_IMAGE = 4
 
 SKIPPED_NODE_MODE_SKIP = "skip"
 SKIPPED_NODE_MODE_IMAGE = "image"
@@ -24,56 +31,37 @@ SKIPPED_NODE_MODE_IMAGE = "image"
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class SyncResult:
-    created: bool
-    map_name: str
-    total_nodes: int
-    matched_hosts: int
-    skipped_nodes: int
-    image_nodes: int
-    total_links: int
-    unresolved_link_rules: int
-    unresolved_link_rule_details: tuple[str, ...]
-
-
-def _sanitize_linktrigger_entries(raw_entries) -> list[dict]:
-    # Entries fetched back from Zabbix's map.get (selectLinks="extend") carry
-    # read-only bookkeeping fields such as "linktriggerid"/"linkid" alongside
-    # the real ones. Feeding those straight back into map.create/map.update
-    # is what's actually accepted by some Zabbix versions but rejected by
-    # others as "Wrong fields for map link.", so only forward the fields a
-    # link trigger is ever written with.
-    sanitized: list[dict] = []
-    for entry in raw_entries or []:
-        if not isinstance(entry, dict):
-            continue
-        triggerid = str(entry.get("triggerid", "")).strip()
-        if not triggerid:
-            continue
-        sanitized.append(
-            {
-                "triggerid": triggerid,
-                "drawtype": str(entry.get("drawtype", "0")),
-                "color": str(entry.get("color", "FF0000")),
-            }
-        )
-    return sanitized
-
-
 def _normalize_host_pair(host_a: str, host_b: str) -> tuple[str, str]:
     return tuple(sorted((host_a.strip(), host_b.strip())))
 
 
-def _hostid_from_selement(selement: dict) -> str | None:
-    elements = selement.get("elements")
-    if not isinstance(elements, list) or not elements:
-        return None
-    first = elements[0]
-    if not isinstance(first, dict):
-        return None
-    hostid = str(first.get("hostid", "")).strip()
-    return hostid or None
+def _resolve_fixed_positions(
+    graph: TopologyGraph,
+    hosts_by_name,
+    existing_map: ZabbixMap | None,
+    stored_positions: dict[str, tuple[int, int]],
+) -> dict[str, tuple[int, int]]:
+    """Resolve each node's already-known position, if any.
+
+    Precedence: a live position on the existing Zabbix map (freshest --
+    covers a human dragging the element around in the Zabbix UI) beats a
+    position stored on the NetBox device (covers the map having been deleted
+    and recreated), which beats letting the node fall through to auto-layout.
+    """
+    hostid_to_xy: dict[str, tuple[int, int]] = {}
+    if existing_map:
+        for selement in existing_map.selements:
+            if selement.hostid and selement.x is not None and selement.y is not None:
+                hostid_to_xy[selement.hostid] = (selement.x, selement.y)
+
+    fixed: dict[str, tuple[int, int]] = {}
+    for node in graph.nodes:
+        host = hosts_by_name.get(node.label)
+        if host and host.hostid in hostid_to_xy:
+            fixed[node.node_id] = hostid_to_xy[host.hostid]
+        elif node.label in stored_positions:
+            fixed[node.node_id] = stored_positions[node.label]
+    return fixed
 
 
 def _build_adjacency(graph: TopologyGraph) -> dict[str, set[str]]:
@@ -259,16 +247,31 @@ def _layout_positions(
     height: int,
     grid_x: int = GRID_STEP_X,
     grid_y: int = GRID_STEP_Y,
+    fixed_positions: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, tuple[int, int]]:
-    if not graph.nodes:
-        return {}
+    # Nodes with a known position (a live Zabbix element or a value stored on
+    # the NetBox device, resolved by the caller) are pinned and excluded from
+    # the force-directed simulation entirely -- only genuinely new nodes get
+    # auto-laid-out, so re-syncing never disturbs a manually placed node.
+    fixed_positions = dict(fixed_positions or {})
 
-    if len(graph.nodes) == 1:
-        node = graph.nodes[0]
-        return {node.node_id: (width // 2, height // 2)}
+    free_nodes = [node for node in graph.nodes if node.node_id not in fixed_positions]
+    if not free_nodes:
+        return fixed_positions
 
-    adjacency = _build_adjacency(graph)
-    node_ids = [node.node_id for node in graph.nodes]
+    free_edges = [
+        edge
+        for edge in graph.edges
+        if edge.source_id not in fixed_positions and edge.target_id not in fixed_positions
+    ]
+    free_graph = TopologyGraph(nodes=free_nodes, edges=free_edges)
+
+    if len(free_graph.nodes) == 1:
+        node = free_graph.nodes[0]
+        return {**fixed_positions, node.node_id: (width // 2, height // 2)}
+
+    adjacency = _build_adjacency(free_graph)
+    node_ids = [node.node_id for node in free_graph.nodes]
     components = _connected_components(node_ids, adjacency)
     components.sort(key=len, reverse=True)
 
@@ -278,7 +281,9 @@ def _layout_positions(
     current_x = padding
     current_y = padding
     row_height = 0
-    occupied_grid: set[tuple[int, int]] = set()
+    # Seed with already-fixed positions so a newly auto-laid-out node never
+    # snaps onto a cell a manually/previously placed node already occupies.
+    occupied_grid: set[tuple[int, int]] = set(fixed_positions.values())
 
     # Give each component a share of the whole map proportional to its node
     # count, instead of only sizing it off its own node count. Without this,
@@ -290,7 +295,7 @@ def _layout_positions(
     packing_efficiency = 0.6  # leaves room for padding/gaps between components
     max_side = float(max(300, min(width, height) - 2 * padding))
 
-    positions: dict[str, tuple[int, int]] = {}
+    positions: dict[str, tuple[int, int]] = dict(fixed_positions)
     for component in components:
         share = len(component) / total_nodes
         target_area = min(available_area * packing_efficiency * share, max_side * max_side)
@@ -316,7 +321,7 @@ def _layout_positions(
     return positions
 
 
-def build_map_payload(
+def build_zabbix_map(
     graph: TopologyGraph,
     hosts_by_name,
     zabbix: ZabbixClient,
@@ -325,40 +330,33 @@ def build_map_payload(
     height: int,
     grid_x: int,
     grid_y: int,
-    existing_map: dict | None,
+    existing_map: ZabbixMap | None,
     skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
     skipped_node_icon_id: str = "",
-) -> tuple[dict, int, int, int, int, tuple[str, ...]]:
-    positions = _layout_positions(graph, width, height, grid_x, grid_y)
+    stored_positions: dict[str, tuple[int, int]] | None = None,
+) -> tuple[ZabbixMap, int, int, int, int, tuple[str, ...], dict[str, tuple[int, int]]]:
+    fixed_positions = _resolve_fixed_positions(graph, hosts_by_name, existing_map, stored_positions or {})
+    positions = _layout_positions(graph, width, height, grid_x, grid_y, fixed_positions=fixed_positions)
 
     existing_host_to_selementid: dict[str, str] = {}
     existing_label_to_image_selementid: dict[str, str] = {}
-    existing_links_by_pair: dict[tuple[str, str], dict] = {}
+    existing_links_by_pair: dict[tuple[str, str], MapLink] = {}
     max_selement_id = 0
     if existing_map:
-        for selement in existing_map.get("selements", []) or []:
-            if not isinstance(selement, dict):
-                continue
-            selementid = str(selement.get("selementid", "")).strip()
+        for selement in existing_map.selements:
+            selementid = selement.selementid
             if selementid.isdigit():
                 max_selement_id = max(max_selement_id, int(selementid))
-            hostid = _hostid_from_selement(selement)
-            if hostid and selementid:
-                existing_host_to_selementid[hostid] = selementid
-            elif selementid and str(selement.get("elementtype")) == str(ELEMENT_TYPE_IMAGE):
-                label = str(selement.get("label", "")).strip()
-                if label:
-                    existing_label_to_image_selementid[label] = selementid
+            if selement.hostid and selementid:
+                existing_host_to_selementid[selement.hostid] = selementid
+            elif selementid and selement.is_image and selement.label:
+                existing_label_to_image_selementid[selement.label] = selementid
 
-        for link in existing_map.get("links", []) or []:
-            if not isinstance(link, dict):
-                continue
-            left = str(link.get("selementid1", "")).strip()
-            right = str(link.get("selementid2", "")).strip()
-            if left and right:
-                existing_links_by_pair[tuple(sorted((left, right)))] = link
+        for link in existing_map.links:
+            if link.selementid1 and link.selementid2:
+                existing_links_by_pair[link.pair] = link
 
-    selements: list[dict] = []
+    selements: list[MapElement] = []
     selement_by_node_id: dict[str, str] = {}
     host_by_node_id: dict[str, object] = {}
 
@@ -366,10 +364,16 @@ def build_map_payload(
     matched_host_count = 0
     image_node_count = 0
     image_icon_id = skipped_node_icon_id or DEFAULT_HOST_ICON_ID
+    final_positions_by_device_name: dict[str, tuple[int, int]] = {}
 
     for node in graph.nodes:
         host = hosts_by_name.get(node.label)
         x, y = positions.get(node.node_id, (40 + next_selement_id * 20, 40 + next_selement_id * 20))
+        # Persisted regardless of a current Zabbix host match: node.label is
+        # always a NetBox device name, so its position is worth keeping even
+        # for a node that isn't matched/rendered on this particular sync.
+        if node.label:
+            final_positions_by_device_name[node.label] = (x, y)
 
         if not host:
             if skipped_node_mode != SKIPPED_NODE_MODE_IMAGE:
@@ -386,15 +390,14 @@ def build_map_payload(
                 next_selement_id += 1
 
             selements.append(
-                {
-                    "selementid": selementid,
-                    "elementtype": ELEMENT_TYPE_IMAGE,
-                    "elements": [],
-                    "label": node.label,
-                    "iconid_off": image_icon_id,
-                    "x": x,
-                    "y": y,
-                }
+                MapElement(
+                    selementid=selementid,
+                    elementtype=ELEMENT_TYPE_IMAGE,
+                    label=node.label,
+                    x=x,
+                    y=y,
+                    iconid_off=image_icon_id,
+                )
             )
             selement_by_node_id[node.node_id] = selementid
             image_node_count += 1
@@ -414,15 +417,15 @@ def build_map_payload(
             next_selement_id += 1
 
         selements.append(
-            {
-                "selementid": selementid,
-                "elementtype": ELEMENT_TYPE_HOST,
-                "elements": [{"hostid": host.hostid}],
-                "label": host.name or host.host,
-                "iconid_off": DEFAULT_HOST_ICON_ID,
-                "x": x,
-                "y": y,
-            }
+            MapElement(
+                selementid=selementid,
+                elementtype=ELEMENT_TYPE_HOST,
+                label=host.name or host.host,
+                x=x,
+                y=y,
+                iconid_off=DEFAULT_HOST_ICON_ID,
+                hostid=host.hostid,
+            )
         )
         selement_by_node_id[node.node_id] = selementid
         host_by_node_id[node.node_id] = host
@@ -437,7 +440,7 @@ def build_map_payload(
             y,
         )
 
-    links: list[dict] = []
+    links: list[MapLink] = []
     edges_by_pair: dict[tuple[str, str], dict] = {}
     trigger_cache: dict[tuple[str, str], str | None] = {}
     unresolved_rules: set[tuple[str, str, str]] = set()
@@ -508,16 +511,9 @@ def build_map_payload(
         )
 
     for pair, edge_data in edges_by_pair.items():
-        link_payload = {
-            "selementid1": pair[0],
-            "selementid2": pair[1],
-            "drawtype": 0,
-            "color": "00AA00",
-        }
-
         host_pair_key = edge_data["host_pair_key"]
         hostids = edge_data["hostids"]
-        link_trigger_entries: list[dict] = []
+        link_trigger_entries: list[MapLinkTrigger] = []
         if host_pair_key is None:
             if edge_data["trigger_names"]:
                 logger.debug(
@@ -548,13 +544,7 @@ def build_map_payload(
                         trigger_name,
                         trigger_id,
                     )
-                    link_trigger_entries.append(
-                        {
-                            "triggerid": trigger_id,
-                            "drawtype": "0",
-                            "color": "FF0000",
-                        }
-                    )
+                    link_trigger_entries.append(MapLinkTrigger(triggerid=trigger_id))
                 else:
                     logger.warning(
                         "Could not match cable trigger from NetBox host_pair=%s trigger_name=%s",
@@ -565,31 +555,29 @@ def build_map_payload(
                         (host_pair_key[0], host_pair_key[1], trigger_name)
                     )
 
+        indicator_type = 0
+        linktriggers: tuple[MapLinkTrigger, ...] = ()
         existing_link = existing_links_by_pair.get(pair)
         if link_trigger_entries:
-            link_payload["indicator_type"] = 1
-            link_payload["linktriggers"] = link_trigger_entries
+            indicator_type = 1
+            linktriggers = tuple(link_trigger_entries)
             logger.debug("Added %s link trigger entries to map link pair=%s", len(link_trigger_entries), pair)
-        elif existing_link and existing_link.get("linktriggers"):
-            sanitized_entries = _sanitize_linktrigger_entries(existing_link.get("linktriggers"))
-            if sanitized_entries:
-                link_payload["indicator_type"] = int(existing_link.get("indicator_type", 1))
-                link_payload["linktriggers"] = sanitized_entries
-                logger.debug("Preserved existing link triggers for pair=%s", pair)
+        elif existing_link and existing_link.linktriggers:
+            indicator_type = existing_link.indicator_type
+            linktriggers = existing_link.linktriggers
+            logger.debug("Preserved existing link triggers for pair=%s", pair)
 
-        # Deliberately not echoing back existing_link["linkid"]: on map.update
-        # Zabbix replaces a map's whole link set from the selementid pairs in
-        # this payload, and treats "linkid" as read-only/output-only here --
-        # including it is what was causing "Wrong fields for map link.".
-        links.append(link_payload)
+        links.append(
+            MapLink(
+                selementid1=pair[0],
+                selementid2=pair[1],
+                indicator_type=indicator_type,
+                linktriggers=linktriggers,
+            )
+        )
 
-    payload = {
-        "name": map_name,
-        "width": str(width),
-        "height": str(height),
-        "selements": selements,
-        "links": links,
-    }
+    label_format = None
+    label_type_image = None
     if image_node_count > 0:
         # By default Zabbix's map-wide label_type is "element name" (2), which
         # host elements resolve to their hostname just fine, but image-type
@@ -604,10 +592,19 @@ def build_map_payload(
         # with the default label_format=0 they're silently ignored and every
         # element keeps following the map-wide label_type, which is exactly
         # why images were still rendering the literal "Image" fallback.
-        payload["label_format"] = "1"
-        payload["label_type_image"] = "0"
+        label_format = "1"
+        label_type_image = "0"
+    zabbix_map = ZabbixMap(
+        name=map_name,
+        width=width,
+        height=height,
+        selements=tuple(selements),
+        links=tuple(links),
+        label_format=label_format,
+        label_type_image=label_type_image,
+    )
     logger.info(
-        "Built map payload name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",
+        "Built map name=%s matched_hosts=%s image_nodes=%s links=%s unresolved_link_rules=%s",
         map_name,
         matched_host_count,
         image_node_count,
@@ -618,12 +615,60 @@ def build_map_payload(
         f"Cable trigger: {host_a} <-> {host_b} | trigger='{trigger_name}'"
         for host_a, host_b, trigger_name in sorted(unresolved_rules)
     )
-    return payload, matched_host_count, image_node_count, len(links), len(unresolved_rules), unresolved_details
+    return (
+        zabbix_map,
+        matched_host_count,
+        image_node_count,
+        len(links),
+        len(unresolved_rules),
+        unresolved_details,
+        final_positions_by_device_name,
+    )
+
+
+def _persist_device_positions(
+    netbox: NetBoxClient,
+    map_name: str,
+    position_records: dict[str, DevicePositionRecord],
+    final_positions_by_device_name: dict[str, tuple[int, int]],
+    field_name: str,
+) -> None:
+    updates: list[tuple[str, dict]] = []
+    for device_name, (x, y) in final_positions_by_device_name.items():
+        record = position_records.get(device_name)
+        if record is None:
+            # No matching NetBox device (e.g. an image/unmatched node not
+            # backed by a real device) -- nothing to write a position to.
+            continue
+
+        existing_entry = record.positions_by_map.get(map_name)
+        if isinstance(existing_entry, dict):
+            try:
+                if int(existing_entry.get("x")) == x and int(existing_entry.get("y")) == y:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        merged = {**record.positions_by_map, map_name: {"x": x, "y": y}}
+        updates.append((record.device_id, merged))
+
+    if not updates:
+        return
+
+    try:
+        netbox.set_device_custom_fields_bulk(updates, field_name=field_name)
+        logger.info("Persisted %s device position(s) to NetBox map_name=%s", len(updates), map_name)
+    except Exception:
+        # Position persistence is additive on top of the core map sync --
+        # a NetBox write failure here should never fail an otherwise
+        # successful Zabbix map sync.
+        logger.exception("Failed to persist device positions to NetBox map_name=%s", map_name)
 
 
 def sync_topology_to_zabbix_map(
     graph: TopologyGraph,
     zabbix: ZabbixClient,
+    netbox: NetBoxClient,
     map_name: str,
     width: int,
     height: int,
@@ -631,6 +676,7 @@ def sync_topology_to_zabbix_map(
     grid_y: int = GRID_STEP_Y,
     skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
     skipped_node_icon_id: str = "",
+    position_field_name: str = DEFAULT_POSITION_FIELD,
 ) -> SyncResult:
     topology_names = sorted({node.label for node in graph.nodes if node.label})
     logger.debug("Syncing topology labels=%s", topology_names)
@@ -638,7 +684,18 @@ def sync_topology_to_zabbix_map(
 
     existing_map = zabbix.get_map_by_name(map_name)
 
-    payload, matched_hosts, image_nodes, link_count, unresolved_link_rules, unresolved_details = build_map_payload(
+    position_records = netbox.fetch_device_position_records(topology_names, field_name=position_field_name)
+    stored_positions = positions_for_map(position_records, map_name)
+
+    (
+        zabbix_map,
+        matched_hosts,
+        image_nodes,
+        link_count,
+        unresolved_link_rules,
+        unresolved_details,
+        final_positions_by_device_name,
+    ) = build_zabbix_map(
         graph=graph,
         hosts_by_name=hosts,
         zabbix=zabbix,
@@ -650,17 +707,26 @@ def sync_topology_to_zabbix_map(
         existing_map=existing_map,
         skipped_node_mode=skipped_node_mode,
         skipped_node_icon_id=skipped_node_icon_id,
+        stored_positions=stored_positions,
     )
 
     created = existing_map is None
 
     if logger.isEnabledFor(logging.DEBUG):
-        logger.debug("Outgoing map payload links=%s", json.dumps(payload.get("links"), default=str))
+        logger.debug("Outgoing map payload links=%s", json.dumps(zabbix_map.to_api_payload()["links"], default=str))
 
     if created:
-        zabbix.create_map(payload)
+        zabbix.create_map(zabbix_map)
     else:
-        zabbix.update_map(existing_map["sysmapid"], payload)
+        zabbix.update_map(existing_map.sysmapid, zabbix_map)
+
+    _persist_device_positions(
+        netbox=netbox,
+        map_name=map_name,
+        position_records=position_records,
+        final_positions_by_device_name=final_positions_by_device_name,
+        field_name=position_field_name,
+    )
 
     return SyncResult(
         created=created,

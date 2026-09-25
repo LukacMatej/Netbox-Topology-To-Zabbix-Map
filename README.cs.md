@@ -4,16 +4,16 @@ Jazyk:
 [![English](https://img.shields.io/badge/English-switch-0a7ea4)](README.md)
 [![Cesky](https://img.shields.io/badge/Cesky-active-cf2e2e)](README.cs.md)
 
-Python CLI aplikace a volitelna webhook sluzba, ktera nacita topologii z NetBoxu a vytvori nebo aktualizuje mapu v Zabbixu.
+Webova sluzba (FastAPI + htmx), ktera nacita topologii z NetBoxu a vytvari nebo aktualizuje mapy v Zabbixu.
 
 ## Funkce
 
 - Import topologie z NetBoxu (vcetne XML exportu z pluginu topology-views).
 - Mapovani popisku zarizeni z NetBoxu na hosty v Zabbixu.
-- Vytvoreni nebo aktualizace jedne mapy v Zabbixu se uzly a linkami.
+- Vytvareni a aktualizace vice map v Zabbixu z weboveho formulare, kazda s vlastnim filtrem NetBox topologie.
 - Automaticke rozmisteni uzlu pomoci silove orientovaneho algoritmu Fruchterman-Reingold.
-- Podpora dry-run rezimu pro bezpecne otestovani.
-- Podpora webhook/manual sync pomoci jednoducheho web serveru.
+- Nahled mapy (dry-run) pred zapisem do Zabbixu.
+- Opakovana synchronizace vsech ulozenych map pres webhook nebo rucne.
 - Podpora indikatoru linek z trigger mapovani v custom fieldu kabelu v NetBoxu.
 - Volitelne vynechani patch panelu z topologie s prepojenim kabelu, ktere skrz ne prochazi.
 
@@ -41,17 +41,14 @@ export ZABBIX_USER="Admin"
 export ZABBIX_PASSWORD="zabbix"
 ```
 
-3. Otestujte bez zapisu zmen:
+3. Spustte web server:
 
 ```bash
-zbx-map-sync --dry-run
+zbx-map-sync --host 0.0.0.0 --port 8080
 ```
 
-4. Provedte synchronizaci:
-
-```bash
-zbx-map-sync
-```
+4. Otevrete `http://<host>:8080/`, vyplnte formular mapy (predvyplneny z promennych prostredi) a pouzijte
+   **Preview (dry-run)** nebo **Save & sync map**.
 
 ## Docker
 
@@ -61,16 +58,10 @@ GitHub workflow publikuje image do Docker Hub pod nazvem:
 <dockerhub-username>/netbox-topology-zabbix-map
 ```
 
-Pull a spusteni:
+Pull a spusteni (mapy vytvorene v UI se ukladaji do `/data/maps.json`, uchovejte je na volume):
 
 ```bash
-docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest
-```
-
-Dry-run v Dockeru:
-
-```bash
-docker run --rm --env-file .env <dockerhub-username>/netbox-topology-zabbix-map:latest --dry-run
+docker run -d -p 7010:7010 --env-file .env -v zbx-map-sync-data:/data <dockerhub-username>/netbox-topology-zabbix-map:latest
 ```
 
 Lokalni build:
@@ -79,19 +70,35 @@ Lokalni build:
 docker build -t netbox-topology-zabbix-map:local .
 ```
 
-## Web rezim
+## Webove UI a endpointy
 
-Spusteni HTTP rezimu:
+`zbx-map-sync` vzdy spousti web server (`--host`, `--port`, `--log-level`).
 
-```bash
-zbx-map-sync --serve --host 0.0.0.0 --port 8080
+Uvodni stranka zobrazuje pripojeni k NetBoxu/Zabbixu (tajne udaje se nikdy nezobrazuji), formular pro novou
+mapu s vychozimi hodnotami z promennych prostredi nize a seznam ulozenych map s akcemi Sync / Edit / Delete.
+Filtr topologie se predava do exportu pluginu topology-views, takze kazdy filtr, ktery plugin podporuje
+(napr. `site_id=1&role_id=3&tag=core`), vytvori samostatnou mapu.
+
+- GET / : webove UI
+- POST /maps : ulozeni definice mapy a jeji synchronizace do Zabbixu
+- POST /maps/preview : dry-run definice mapy (nic se neulozi ani nezapise do Zabbixu)
+- POST /maps/sync : synchronizace jedne ulozene mapy (pole formulare `name`) nebo vsech
+- POST /maps/delete : odstraneni ulozene definice mapy (mapa v Zabbixu zustane)
+- GET /sync : synchronizace vsech map, vysledek v JSON
+- POST /webhook : webhook trigger, synchronizuje vsechny mapy, vysledek v JSON
+- GET/POST /cables/<cable_id>/triggers : vyber triggeru linky pro kabel
+
+### Ulozene mapy
+
+Definice map se ukladaji do JSON souboru dle `ZABBIX_MAPS_CONFIG` (vychozi `maps.json` v pracovnim
+adresari, v Dockeru `/data/maps.json`):
+
+```json
+{"maps": [{"name": "Core", "topology_query": "site_id=1", "ignored_device_roles": ["patchpanel"]}]}
 ```
 
-Endpointy:
-
-- GET / : jednoducha stranka s odkazem na manualni synchronizaci
-- GET /sync : manualni spusteni synchronizace
-- POST /webhook : webhook trigger synchronizace
+Chybejici pole se doplni z vychozich hodnot prostredi. `/sync` a `/webhook` synchronizuji vsechny ulozene
+mapy; dokud neni ulozena zadna mapa, synchronizuji jednu mapu definovanou promennymi prostredi.
 
 ## Konfigurace
 
@@ -102,7 +109,7 @@ Povinne promenne:
 - ZABBIX_URL
 - ZABBIX_USER a ZABBIX_PASSWORD, nebo ZABBIX_TOKEN
 
-Volitelne promenne:
+Volitelne promenne (promenne mapy jsou vychozi hodnoty weboveho formulare):
 
 - NETBOX_TOPOLOGY_PATH (vychozi: /api/plugins/netbox_topology_views/xml-export/)
 - NETBOX_TOPOLOGY_QUERY (vychozi: show_unconnected=True&show_cables=True&limit=0)
@@ -116,6 +123,7 @@ Volitelne promenne:
 - ZABBIX_LAYOUT_GRID_Y (vychozi: 40)
 - ZABBIX_SKIPPED_NODE_MODE (vychozi: skip; jedna z hodnot skip, image)
 - ZABBIX_SKIPPED_NODE_ICON_ID (ID ikony pro uzly v rezimu image; vychozi je vestavena ikona hostu)
+- ZABBIX_MAPS_CONFIG (vychozi: maps.json; soubor s ulozenymi definicemi map)
 - LOG_LEVEL (vychozi: DEBUG)
 
 ### Rezim vynechanych uzlu
