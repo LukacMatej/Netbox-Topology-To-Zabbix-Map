@@ -43,6 +43,27 @@ def _merge_trigger_name_tuples(*trigger_sets: tuple[str, ...]) -> tuple[str, ...
     return tuple(merged)
 
 
+ERROR_BODY_LOG_LIMIT = 1000
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    """Like ``raise_for_status`` but keeps NetBox's error body in the message.
+
+    NetBox answers API server errors with a short JSON body naming the
+    exception (e.g. from a plugin view); without it a 500 is undiagnosable.
+    """
+    if response.ok:
+        return
+    body = (response.text or "").strip()[:ERROR_BODY_LOG_LIMIT]
+    logger.error(
+        "NetBox request failed status=%s url=%s body=%s", response.status_code, response.url, body or "<empty>"
+    )
+    message = f"{response.status_code} {response.reason} for url: {response.url}"
+    if body:
+        message += f" | NetBox response: {body}"
+    raise requests.HTTPError(message, response=response)
+
+
 def _next_page_url(base_url: str, next_value) -> str | None:
     if not next_value:
         return None
@@ -291,7 +312,7 @@ class NetBoxClient:
         while True:
             logger.debug("Fetching paginated NetBox endpoint url=%s params=%s", url, current_params or None)
             response = self.session.get(url, params=current_params or None, timeout=self.timeout)
-            response.raise_for_status()
+            _raise_for_status(response)
             payload = response.json()
 
             if isinstance(payload, dict) and isinstance(payload.get("results"), list):
@@ -325,7 +346,7 @@ class NetBoxClient:
 
         devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
         response = self.session.get(devices_url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
 
         by_id: dict[str, dict] = {}
@@ -348,7 +369,7 @@ class NetBoxClient:
         cables_url = urljoin(f"{self.base_url}/", "api/dcim/cables/")
         logger.debug("Batch-fetching cable details count=%s", len(cable_ids))
         response = self.session.get(cables_url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
 
         by_id: dict[str, dict] = {}
@@ -367,7 +388,7 @@ class NetBoxClient:
         url = urljoin(f"{self.base_url}/", f"api/dcim/cables/{cable_id}/")
         logger.debug("Fetching NetBox cable url=%s", url)
         response = self.session.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected NetBox cable response for cable_id={cable_id}")
@@ -383,7 +404,7 @@ class NetBoxClient:
         try:
             logger.debug("Resolving termination endpoint url=%s", normalized_url)
             response = self.session.get(normalized_url, timeout=self.timeout)
-            response.raise_for_status()
+            _raise_for_status(response)
             payload = response.json()
         except Exception as exc:
             logger.debug("Could not resolve endpoint url=%s error=%s", normalized_url, exc)
@@ -451,7 +472,7 @@ class NetBoxClient:
 
             logger.debug("Batch-fetching device positions count=%s", len(chunk))
             response = self.session.get(devices_url, params=params, timeout=self.timeout)
-            response.raise_for_status()
+            _raise_for_status(response)
             payload = response.json()
 
             for item in payload.get("results", []):
@@ -529,7 +550,7 @@ class NetBoxClient:
         logger.info("Fetching NetBox topology url=%s", url)
 
         response = self.session.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         content_type = response.headers.get("Content-Type", "").lower()
         logger.debug("NetBox topology response content_type=%s", content_type)
         if "xml" in content_type:
@@ -722,7 +743,7 @@ class NetBoxClient:
             try:
                 logger.debug("Resolving termination endpoint url=%s", normalized_url)
                 endpoint_response = self.session.get(normalized_url, timeout=self.timeout)
-                endpoint_response.raise_for_status()
+                _raise_for_status(endpoint_response)
                 endpoint_payload = endpoint_response.json()
             except Exception as exc:
                 logger.debug("Could not resolve endpoint url=%s error=%s", normalized_url, exc)

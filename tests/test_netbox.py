@@ -584,3 +584,24 @@ def test_fetch_topology_xml_batches_cable_detail_fetch(monkeypatch: pytest.Monke
     assert len(detail_fetch_urls) == 1
     assert calls["count"] == 4
     assert {edge.trigger_names for edge in graph.edges} == {("trigger1",), ("trigger2",)}
+
+
+def test_fetch_topology_error_includes_netbox_error_body(monkeypatch) -> None:
+    import requests
+
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    response = requests.Response()
+    response.status_code = 500
+    response.reason = "Internal Server Error"
+    response.url = "http://netbox.local/api/plugins/netbox_topology_views/xml-export/?show_cables=True"
+    response._content = b'{"error": "boom", "exception": "KeyError", "netbox_version": "4.4.0"}'
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: response)
+
+    with pytest.raises(requests.HTTPError, match="KeyError") as exc_info:
+        client.fetch_topology(path="/api/plugins/netbox_topology_views/xml-export/")
+
+    assert exc_info.value.response is response
+    assert "500 Internal Server Error" in str(exc_info.value)
