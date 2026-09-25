@@ -626,19 +626,46 @@ def build_zabbix_map(
     )
 
 
+def _live_positions_by_device_name(existing_map: ZabbixMap, zabbix: ZabbixClient) -> dict[str, tuple[int, int]]:
+    """Current element positions on a Zabbix map, keyed by NetBox device name.
+
+    Host elements are named by their Zabbix technical host name (what topology
+    labels are matched against in get_hosts_by_names); image elements carry
+    the NetBox device name as their label.
+    """
+    host_elements = [e for e in existing_map.selements if e.hostid and e.x is not None and e.y is not None]
+    hosts_by_id = zabbix.get_hosts_by_ids([e.hostid for e in host_elements]) if host_elements else {}
+
+    positions: dict[str, tuple[int, int]] = {}
+    for element in host_elements:
+        host = hosts_by_id.get(element.hostid)
+        if host:
+            positions[host.host] = (element.x, element.y)
+    for element in existing_map.selements:
+        if element.is_image and element.label and element.x is not None and element.y is not None:
+            positions.setdefault(element.label, (element.x, element.y))
+    return positions
+
+
 def _persist_device_positions(
     netbox: NetBoxClient,
     map_name: str,
     position_records: dict[str, DevicePositionRecord],
-    final_positions_by_device_name: dict[str, tuple[int, int]],
+    positions_by_device_name: dict[str, tuple[int, int]],
     field_name: str,
-) -> None:
+    stage: str,
+) -> dict[str, DevicePositionRecord]:
+    """Write changed per-map positions to NetBox; return the records with them merged in.
+
+    The merged records are returned even when the NetBox write fails, so the
+    rest of the sync still works with the freshest positions.
+    """
+    merged_records = dict(position_records)
     updates: list[tuple[str, dict]] = []
-    for device_name, (x, y) in final_positions_by_device_name.items():
+    for device_name, (x, y) in positions_by_device_name.items():
         record = position_records.get(device_name)
         if record is None:
-            # No matching NetBox device (e.g. an image/unmatched node not
-            # backed by a real device) -- nothing to write a position to.
+            # No matching NetBox device -- nothing to write a position to.
             continue
 
         existing_entry = record.positions_by_map.get(map_name)
@@ -650,19 +677,21 @@ def _persist_device_positions(
                 pass
 
         merged = {**record.positions_by_map, map_name: {"x": x, "y": y}}
+        merged_records[device_name] = DevicePositionRecord(device_id=record.device_id, positions_by_map=merged)
         updates.append((record.device_id, merged))
 
     if not updates:
-        return
+        return merged_records
 
     try:
         netbox.set_device_custom_fields_bulk(updates, field_name=field_name)
-        logger.info("Persisted %s device position(s) to NetBox map_name=%s", len(updates), map_name)
+        logger.info("Persisted %s %s device position(s) to NetBox map_name=%s", len(updates), stage, map_name)
     except Exception:
         # Position persistence is additive on top of the core map sync --
         # a NetBox write failure here should never fail an otherwise
         # successful Zabbix map sync.
-        logger.exception("Failed to persist device positions to NetBox map_name=%s", map_name)
+        logger.exception("Failed to persist %s device positions to NetBox map_name=%s", stage, map_name)
+    return merged_records
 
 
 def sync_topology_to_zabbix_map(
@@ -684,7 +713,21 @@ def sync_topology_to_zabbix_map(
 
     existing_map = zabbix.get_map_by_name(map_name)
 
-    position_records = netbox.fetch_device_position_records(topology_names, field_name=position_field_name)
+    # Snapshot where elements currently sit on the live map (possibly moved by
+    # hand in Zabbix) into NetBox before anything is rewritten -- including
+    # devices that are no longer part of this map's topology.
+    live_positions = _live_positions_by_device_name(existing_map, zabbix) if existing_map else {}
+    position_records = netbox.fetch_device_position_records(
+        sorted(set(topology_names) | set(live_positions)), field_name=position_field_name
+    )
+    position_records = _persist_device_positions(
+        netbox=netbox,
+        map_name=map_name,
+        position_records=position_records,
+        positions_by_device_name=live_positions,
+        field_name=position_field_name,
+        stage="live",
+    )
     stored_positions = positions_for_map(position_records, map_name)
 
     (
@@ -724,8 +767,9 @@ def sync_topology_to_zabbix_map(
         netbox=netbox,
         map_name=map_name,
         position_records=position_records,
-        final_positions_by_device_name=final_positions_by_device_name,
+        positions_by_device_name=final_positions_by_device_name,
         field_name=position_field_name,
+        stage="final",
     )
 
     return SyncResult(

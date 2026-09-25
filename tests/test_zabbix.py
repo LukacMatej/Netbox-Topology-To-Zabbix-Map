@@ -164,3 +164,25 @@ def test_update_map_sends_serialized_map_with_sysmapid(monkeypatch: pytest.Monke
     method, params = calls[0]
     assert method == "map.update"
     assert params == {"sysmapid": "42", "name": "Core", "width": "800", "height": "600", "selements": [], "links": []}
+
+
+def test_get_hosts_by_ids_keys_hosts_by_hostid(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+    calls = []
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        calls.append((method, params))
+        return [{"hostid": "10", "host": "switch-1", "name": "Switch 1"}]
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    hosts = client.get_hosts_by_ids(["10", "10", ""])
+
+    assert calls == [("host.get", {"output": ["hostid", "host", "name"], "hostids": ["10"]})]
+    assert hosts["10"].host == "switch-1"
+
+
+def test_get_hosts_by_ids_skips_rpc_without_ids() -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+
+    assert client.get_hosts_by_ids([]) == {}

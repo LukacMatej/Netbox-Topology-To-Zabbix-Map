@@ -107,6 +107,25 @@ class ZabbixClient:
         logger.debug("Resolved %s Zabbix host lookup entries", len(hosts))
         return hosts
 
+    def get_hosts_by_ids(self, hostids: list[str]) -> dict[str, ZabbixHost]:
+        """Hosts keyed by hostid, e.g. to name the host elements of an existing map."""
+        unique_ids = sorted({str(hostid) for hostid in hostids if hostid})
+        if not unique_ids:
+            return {}
+
+        logger.debug("Fetching Zabbix hosts for %s hostids", len(unique_ids))
+        result = self._rpc(
+            "host.get",
+            {
+                "output": ["hostid", "host", "name"],
+                "hostids": unique_ids,
+            },
+        )
+        return {
+            item["hostid"]: ZabbixHost(hostid=item["hostid"], host=item["host"], name=item.get("name", item["host"]))
+            for item in result
+        }
+
     def get_map_by_name(self, map_name: str) -> ZabbixMap | None:
         logger.debug("Looking up existing map name=%s", map_name)
         maps = self._rpc(

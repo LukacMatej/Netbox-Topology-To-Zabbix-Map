@@ -15,11 +15,21 @@ def build_map_payload(**kwargs):
 
 
 class FakeZabbix:
-    def __init__(self, existing_map=None) -> None:
+    def __init__(self, existing_map=None, events=None, hosts_by_id=None) -> None:
         self.created_payload = None
         self.updated_payload = None
         self.update_map_id = None
         self._existing_map = existing_map
+        self.events = events if events is not None else []
+        self.hosts_by_id = hosts_by_id or {
+            "101": ZabbixHost(hostid="101", host="Switch 1", name="Switch 1"),
+            "102": ZabbixHost(hostid="102", host="Switch 2", name="Switch 2"),
+        }
+        self.get_hosts_by_ids_calls = []
+
+    def get_hosts_by_ids(self, hostids):
+        self.get_hosts_by_ids_calls.append(list(hostids))
+        return {hostid: self.hosts_by_id[hostid] for hostid in hostids if hostid in self.hosts_by_id}
 
     def find_trigger_id(self, hostids, trigger_name, match="auto"):
         if trigger_name == "ICMP Ping: Unavailable by ICMP ping":
@@ -68,21 +78,29 @@ class FakeZabbix:
         return {"sysmapids": ["100"]}
 
     def update_map(self, mapid, zabbix_map):
+        self.events.append("update_map")
         self.update_map_id = mapid
         self.updated_payload = zabbix_map.to_api_payload()
         return {"sysmapids": [mapid]}
 
 
 class FakeNetBox:
-    def __init__(self, records=None) -> None:
+    def __init__(self, records=None, events=None, fail_bulk_calls=()) -> None:
         self.records = records or {}
-        self.bulk_updates = None
+        # One list of (device_id, positions_by_map) per bulk PATCH call.
+        self.bulk_updates = []
+        self.events = events if events is not None else []
+        self.fail_bulk_calls = set(fail_bulk_calls)
 
     def fetch_device_position_records(self, device_names, field_name="zabbix_map_coordinates"):
         return {name: self.records[name] for name in device_names if name in self.records}
 
     def set_device_custom_fields_bulk(self, updates, field_name="zabbix_map_coordinates"):
-        self.bulk_updates = list(updates)
+        call_index = len(self.bulk_updates)
+        self.bulk_updates.append(list(updates))
+        self.events.append("netbox_bulk")
+        if call_index in self.fail_bulk_calls:
+            raise ValueError("NetBox rejected bulk update")
 
 
 def test_build_map_payload_reports_unresolved_rule_details() -> None:
@@ -391,7 +409,7 @@ def test_sync_topology_creates_map_when_missing() -> None:
     assert zbx.updated_payload is None
     # Neither device has a NetBox position record (e.g. the custom field
     # isn't set up / the device wasn't found), so there's nothing to persist.
-    assert nb.bulk_updates is None
+    assert nb.bulk_updates == []
 
 
 def test_sync_topology_updates_existing_map_and_preserves_ids() -> None:
@@ -451,8 +469,9 @@ def test_sync_topology_persists_new_device_positions_to_netbox() -> None:
         height=800,
     )
 
-    assert nb.bulk_updates is not None
-    updates_by_device = dict(nb.bulk_updates)
+    # The "Existing" map has no element positions, so only the final write happens.
+    assert len(nb.bulk_updates) == 1
+    updates_by_device = dict(nb.bulk_updates[0])
     # Switch 1's position on "Existing" is new -> written.
     assert "Existing" in updates_by_device["901"]
     # Switch 2's unrelated "Other Map" entry must survive the merge.
@@ -490,7 +509,7 @@ def test_sync_topology_skips_write_when_live_position_already_matches_stored() -
 
     # Both devices' positions already match what's stored -- nothing to write,
     # so the bulk-update call is never even made.
-    assert nb.bulk_updates is None
+    assert nb.bulk_updates == []
 
 
 def test_layout_positions_never_recomputes_fixed_nodes() -> None:
@@ -529,3 +548,155 @@ def test_layout_positions_returns_fixed_positions_when_all_nodes_known() -> None
     positions = _layout_positions(graph, width=1200, height=800, fixed_positions=fixed)
 
     assert positions == fixed
+
+
+def _two_switch_graph() -> TopologyGraph:
+    return TopologyGraph(
+        nodes=[
+            TopologyNode(node_id="n1", label="Switch 1"),
+            TopologyNode(node_id="n2", label="Switch 2"),
+        ],
+        edges=[TopologyEdge(source_id="n1", target_id="n2")],
+    )
+
+
+def test_sync_snapshots_live_positions_to_netbox_before_updating_map() -> None:
+    events = []
+    existing_map = {
+        "sysmapid": "42",
+        "selements": [
+            {"selementid": "11", "elements": [{"hostid": "101"}], "x": "700", "y": "80"},
+            {"selementid": "12", "elements": [{"hostid": "102"}], "x": "300", "y": "400"},
+        ],
+        "links": [],
+    }
+    zbx = FakeZabbix(existing_map=existing_map, events=events)
+    nb = FakeNetBox(
+        records={
+            # Switch 1 was dragged in Zabbix since the last sync; Switch 2 is unchanged.
+            "Switch 1": DevicePositionRecord(device_id="901", positions_by_map={"Existing": {"x": 100, "y": 200}}),
+            "Switch 2": DevicePositionRecord(device_id="902", positions_by_map={"Existing": {"x": 300, "y": 400}}),
+        },
+        events=events,
+    )
+
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=nb, map_name="Existing", width=1200, height=800
+    )
+
+    assert events == ["netbox_bulk", "update_map"]
+    assert nb.bulk_updates == [[("901", {"Existing": {"x": 700, "y": 80}})]]
+    switch1 = next(s for s in zbx.updated_payload["selements"] if s["elements"] == [{"hostid": "101"}])
+    assert (switch1["x"], switch1["y"]) == (700, 80)
+
+
+def test_sync_snapshot_saves_hosts_no_longer_in_topology() -> None:
+    existing_map = {
+        "sysmapid": "42",
+        "selements": [
+            {"selementid": "11", "elements": [{"hostid": "101"}], "x": "10", "y": "20"},
+            {"selementid": "12", "elements": [{"hostid": "102"}], "x": "30", "y": "40"},
+            {"selementid": "13", "elements": [{"hostid": "103"}], "x": "500", "y": "600"},
+        ],
+        "links": [],
+    }
+    zbx = FakeZabbix(
+        existing_map=existing_map,
+        hosts_by_id={
+            "101": ZabbixHost(hostid="101", host="Switch 1", name="Switch 1"),
+            "102": ZabbixHost(hostid="102", host="Switch 2", name="Switch 2"),
+            "103": ZabbixHost(hostid="103", host="Old Router", name="Old Router"),
+        },
+    )
+    nb = FakeNetBox(records={"Old Router": DevicePositionRecord(device_id="903", positions_by_map={})})
+
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=nb, map_name="Existing", width=1200, height=800
+    )
+
+    assert zbx.get_hosts_by_ids_calls == [["101", "102", "103"]]
+    assert nb.bulk_updates[0] == [("903", {"Existing": {"x": 500, "y": 600}})]
+
+
+def test_sync_keeps_live_position_of_image_element() -> None:
+    graph = TopologyGraph(
+        nodes=[
+            TopologyNode(node_id="n1", label="Switch 1"),
+            TopologyNode(node_id="n3", label="Patch Panel A"),
+        ],
+        edges=[TopologyEdge(source_id="n1", target_id="n3")],
+    )
+    existing_map = {
+        "sysmapid": "42",
+        "selements": [
+            {"selementid": "11", "elements": [{"hostid": "101"}], "x": "10", "y": "20"},
+            {"selementid": "15", "elementtype": "4", "elements": [], "label": "Patch Panel A", "x": "640", "y": "480"},
+        ],
+        "links": [],
+    }
+    zbx = FakeZabbix(existing_map=existing_map)
+    nb = FakeNetBox(
+        records={
+            "Patch Panel A": DevicePositionRecord(device_id="905", positions_by_map={"Existing": {"x": 1, "y": 1}}),
+        }
+    )
+
+    sync_topology_to_zabbix_map(
+        graph=graph,
+        zabbix=zbx,
+        netbox=nb,
+        map_name="Existing",
+        width=1200,
+        height=800,
+        skipped_node_mode="image",
+    )
+
+    image = next(s for s in zbx.updated_payload["selements"] if s["elementtype"] == 4)
+    assert image["selementid"] == "15"
+    assert (image["x"], image["y"]) == (640, 480)
+    assert nb.bulk_updates[0] == [("905", {"Existing": {"x": 640, "y": 480}})]
+
+
+def test_sync_continues_when_snapshot_write_fails() -> None:
+    existing_map = {
+        "sysmapid": "42",
+        "selements": [
+            {"selementid": "15", "elementtype": "4", "elements": [], "label": "Patch Panel A", "x": "640", "y": "480"},
+        ],
+        "links": [],
+    }
+    graph = TopologyGraph(nodes=[TopologyNode(node_id="n3", label="Patch Panel A")], edges=[])
+    zbx = FakeZabbix(existing_map=existing_map)
+    nb = FakeNetBox(
+        records={"Patch Panel A": DevicePositionRecord(device_id="905", positions_by_map={})},
+        fail_bulk_calls={0},
+    )
+
+    result = sync_topology_to_zabbix_map(
+        graph=graph,
+        zabbix=zbx,
+        netbox=nb,
+        map_name="Existing",
+        width=1200,
+        height=800,
+        skipped_node_mode="image",
+    )
+
+    assert result.created is False
+    image = zbx.updated_payload["selements"][0]
+    # The failed snapshot write still feeds this sync's layout from memory.
+    assert (image["x"], image["y"]) == (640, 480)
+
+
+def test_sync_without_existing_map_takes_no_snapshot() -> None:
+    zbx = FakeZabbix()
+    nb = FakeNetBox(records={"Switch 1": DevicePositionRecord(device_id="901", positions_by_map={})})
+
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=nb, map_name="New", width=1200, height=800
+    )
+
+    assert zbx.get_hosts_by_ids_calls == []
+    # Only the final write of the freshly auto-laid-out position.
+    assert len(nb.bulk_updates) == 1
+    assert nb.bulk_updates[0][0][0] == "901"
