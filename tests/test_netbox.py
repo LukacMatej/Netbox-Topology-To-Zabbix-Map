@@ -605,3 +605,23 @@ def test_fetch_topology_error_includes_netbox_error_body(monkeypatch) -> None:
 
     assert exc_info.value.response is response
     assert "500 Internal Server Error" in str(exc_info.value)
+
+
+def test_set_device_custom_fields_bulk_sends_integer_ids(monkeypatch) -> None:
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    captured = {}
+
+    def fake_patch(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse(json_data=[])
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    client.set_device_custom_fields_bulk([("901", {"Core": {"x": 1, "y": 2}})], field_name="zabbix_map_coordinates")
+
+    assert captured["url"] == "http://netbox.local/api/dcim/devices/"
+    # A string id would match no object in NetBox's bulk_update and fail with 400 "No data provided".
+    assert captured["json"] == [{"id": 901, "custom_fields": {"zabbix_map_coordinates": {"Core": {"x": 1, "y": 2}}}}]

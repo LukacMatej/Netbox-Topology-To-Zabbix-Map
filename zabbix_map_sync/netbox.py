@@ -517,7 +517,10 @@ class NetBoxClient:
             return
 
         devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
-        body = [{"id": device_id, "custom_fields": {field_name: value}} for device_id, value in updates]
+        # NetBox matches bulk-update entries to objects by integer pk
+        # (update_data.get(obj.id)); a string id silently matches nothing and the
+        # whole request fails with 400 "No data provided".
+        body = [{"id": int(device_id), "custom_fields": {field_name: value}} for device_id, value in updates]
         logger.info("Bulk-updating NetBox device custom field field=%s count=%s", field_name, len(body))
         response = self.session.patch(devices_url, json=body, timeout=self.timeout)
         if not response.ok:
