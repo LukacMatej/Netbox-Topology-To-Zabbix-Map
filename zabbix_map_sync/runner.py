@@ -63,6 +63,8 @@ def _sync_one_map(
         grid_y=map_def.grid_y,
         skipped_node_mode=map_def.skipped_node_mode,
         skipped_node_icon_id=map_def.skipped_node_icon_id,
+        icon_map=map_def.icon_map,
+        inventory_role_sync=settings.zabbix_inventory_role_sync,
     )
     logger.info(
         "Synchronization finished map=%s created=%s matched_hosts=%s total_links=%s unresolved_link_rules=%s",

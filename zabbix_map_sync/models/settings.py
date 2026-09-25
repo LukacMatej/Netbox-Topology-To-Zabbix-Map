@@ -23,6 +23,8 @@ class Settings:
     zabbix_skipped_node_mode: str
     zabbix_skipped_node_icon_id: str
     zabbix_maps_config: str
+    zabbix_icon_map: str = ""
+    zabbix_inventory_role_sync: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,3 +40,5 @@ class MapDefinition:
     ignored_device_roles: tuple[str, ...]
     skipped_node_mode: str
     skipped_node_icon_id: str
+    # Name of a Zabbix icon map to attach to the map; empty leaves the map's setting untouched.
+    icon_map: str = ""

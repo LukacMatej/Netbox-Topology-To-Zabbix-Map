@@ -124,6 +124,8 @@ Optional variables (map-level ones are the defaults of the web form):
 - ZABBIX_SKIPPED_NODE_MODE (default: skip; one of skip, image)
 - ZABBIX_SKIPPED_NODE_ICON_ID (icon ID used for image-mode skipped nodes; defaults to the built-in host icon)
 - ZABBIX_MAPS_CONFIG (default: maps.json; file with saved map definitions)
+- ZABBIX_ICON_MAP (default icon map name for new maps; empty = leave the map's icon map setting untouched)
+- ZABBIX_INVENTORY_ROLE_SYNC (default: false; write NetBox device role slug to Zabbix host inventory "Type")
 - LOG_LEVEL (default: DEBUG)
 
 ### Skipped Node Mode
@@ -139,6 +141,21 @@ Devices identified as patch panels by their NetBox label (e.g. containing "patch
 `NETBOX_IGNORED_DEVICE_ROLES`. When enabled, each patch panel node is spliced out and its two
 cables are reconnected directly between the devices on either side, so the map shows the
 effective link instead of the intermediate panel.
+
+## Host Icons (Zabbix Icon Mapping)
+
+Host icons are chosen by Zabbix itself through an icon map (Administration > General > Icon mapping):
+
+1. Create an icon map with mappings on inventory field **Type**, one per NetBox device role slug. Expressions
+   are regular expressions and match anywhere in the value, so anchor them, e.g. `^core-switch$`. Set a
+   *Default* icon for everything else.
+2. Set `ZABBIX_INVENTORY_ROLE_SYNC=true`. On every sync the device's role slug is written to the matched
+   Zabbix host's inventory Type (only when it differs). Hosts with inventory disabled are switched to
+   manual inventory; hosts in automatic mode keep it. This needs an Admin or Super admin API token.
+3. Enter the icon map name in the map form (default from `ZABBIX_ICON_MAP`).
+
+Icon mapping only applies to host elements; unmatched nodes shown as images keep
+`ZABBIX_SKIPPED_NODE_ICON_ID`.
 
 ## Link Trigger Mapping
 

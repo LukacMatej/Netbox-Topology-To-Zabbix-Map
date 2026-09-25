@@ -9,6 +9,7 @@
   ("grid_x", "Grid X", "ZABBIX_LAYOUT_GRID_X", "", "number", false),
   ("grid_y", "Grid Y", "ZABBIX_LAYOUT_GRID_Y", "", "number", false),
   ("skipped_node_icon_id", "Skipped node icon ID", "ZABBIX_SKIPPED_NODE_ICON_ID", "Used in image mode; empty = default host icon.", "text", false),
+  ("icon_map", "Icon map", "ZABBIX_ICON_MAP", "Zabbix icon map name for host icons; empty = keep the map's current setting.", "text", false),
 ] %}
 <form id="map-form" class="card" hx-post="/maps" hx-target="#result" hx-disabled-elt="find button">
   <h2>{% if original_name %}Edit map &ldquo;{{ original_name }}&rdquo;{% else %}New map{% endif %}</h2>

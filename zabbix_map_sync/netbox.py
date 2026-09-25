@@ -484,8 +484,12 @@ class NetBoxClient:
                     continue
                 custom_fields = item.get("custom_fields") if isinstance(item.get("custom_fields"), dict) else {}
                 positions_by_map = _normalize_positions_by_map(custom_fields.get(field_name))
+                role_slug, role_name = _extract_device_role(item)
                 records[device_name] = DevicePositionRecord(
-                    device_id=device_id, positions_by_map=positions_by_map
+                    device_id=device_id,
+                    positions_by_map=positions_by_map,
+                    role_slug=role_slug,
+                    role_name=role_name,
                 )
 
         logger.debug("Fetched device position records count=%s", len(records))
@@ -1027,6 +1031,18 @@ class NetBoxClient:
             len(deduplicated_edges),
         )
         return TopologyGraph(nodes=list(node_by_id.values()), edges=deduplicated_edges)
+
+
+def _extract_device_role(device: dict) -> tuple[str, str]:
+    """(slug, name) of a device's role; NetBox < 3.6 called the field device_role."""
+    for key in ("role", "device_role"):
+        value = device.get(key)
+        if isinstance(value, dict):
+            slug = str(value.get("slug", "")).strip()
+            name = str(value.get("name") or value.get("display") or "").strip()
+            if slug or name:
+                return slug, name
+    return "", ""
 
 
 def _extract_device_role_variants(device: dict) -> set[str]:

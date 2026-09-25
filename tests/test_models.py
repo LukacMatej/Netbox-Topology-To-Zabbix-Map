@@ -96,3 +96,11 @@ def test_zabbix_map_to_api_payload_omits_read_only_fields() -> None:
     assert payload["links"][0] == {"selementid1": "1", "selementid2": "2", "drawtype": 0, "color": "00AA00"}
     assert payload["links"][1]["indicator_type"] == 1
     assert payload["links"][1]["linktriggers"] == [{"triggerid": "9", "drawtype": "0", "color": "FF0000"}]
+
+
+def test_zabbix_map_iconmapid_round_trip() -> None:
+    parsed = ZabbixMap.from_api({"name": "Core", "width": "10", "height": "10", "iconmapid": "7"})
+
+    assert parsed.iconmapid == "7"
+    assert ZabbixMap(name="Core", width=10, height=10, iconmapid="7").to_api_payload()["iconmapid"] == "7"
+    assert "iconmapid" not in ZabbixMap(name="Core", width=10, height=10).to_api_payload()

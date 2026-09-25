@@ -155,6 +155,8 @@ class ZabbixMap:
     links: tuple[MapLink, ...] = ()
     # Set only for a map that already exists in Zabbix.
     sysmapid: str | None = None
+    # None leaves the map's icon map untouched on map.update.
+    iconmapid: str | None = None
     label_format: str | None = None
     label_type_image: str | None = None
 
@@ -170,6 +172,7 @@ class ZabbixMap:
             ),
             links=tuple(MapLink.from_api(item) for item in raw.get("links") or [] if isinstance(item, dict)),
             sysmapid=sysmapid,
+            iconmapid=_optional_str(raw.get("iconmapid")),
             label_format=_optional_str(raw.get("label_format")),
             label_type_image=_optional_str(raw.get("label_type_image")),
         )
@@ -183,6 +186,8 @@ class ZabbixMap:
             "selements": [element.to_api() for element in self.selements],
             "links": [link.to_api() for link in self.links],
         }
+        if self.iconmapid is not None:
+            payload["iconmapid"] = self.iconmapid
         if self.label_format is not None:
             payload["label_format"] = self.label_format
         if self.label_type_image is not None:

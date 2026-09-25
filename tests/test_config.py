@@ -32,6 +32,8 @@ def clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "ZABBIX_SKIPPED_NODE_MODE",
         "ZABBIX_SKIPPED_NODE_ICON_ID",
         "ZABBIX_MAPS_CONFIG",
+        "ZABBIX_ICON_MAP",
+        "ZABBIX_INVENTORY_ROLE_SYNC",
     ]
     for key in keys:
         monkeypatch.delenv(key, raising=False)
@@ -184,3 +186,22 @@ def test_load_map_definitions_rejects_invalid_file(monkeypatch, tmp_path) -> Non
 
     with pytest.raises(ConfigurationError, match="\"maps\" array"):
         load_map_definitions(load_settings())
+
+
+def test_icon_map_and_inventory_role_sync_settings(monkeypatch, tmp_path) -> None:
+    _base_env(monkeypatch, tmp_path / "maps.json")
+    monkeypatch.setenv("ZABBIX_ICON_MAP", "Role icons")
+    monkeypatch.setenv("ZABBIX_INVENTORY_ROLE_SYNC", "True")
+    settings = load_settings()
+    defaults = default_map_definition(settings)
+
+    assert settings.zabbix_inventory_role_sync is True
+    assert defaults.icon_map == "Role icons"
+    assert parse_map_definition({"name": "A", "topology_query": "", "icon_map": ""}, defaults).icon_map == ""
+
+    save_map_definition(settings, parse_map_definition({"name": "A", "topology_query": "", "icon_map": "Other"}, defaults))
+    assert load_map_definitions(settings)[0].icon_map == "Other"
+
+    monkeypatch.setenv("ZABBIX_INVENTORY_ROLE_SYNC", "maybe")
+    with pytest.raises(ConfigurationError, match="ZABBIX_INVENTORY_ROLE_SYNC"):
+        load_settings()

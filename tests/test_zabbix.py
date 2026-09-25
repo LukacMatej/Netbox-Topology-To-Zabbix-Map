@@ -186,3 +186,65 @@ def test_get_hosts_by_ids_skips_rpc_without_ids() -> None:
     client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
 
     assert client.get_hosts_by_ids([]) == {}
+
+
+def test_get_hosts_by_names_reads_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+    calls = []
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        calls.append(params)
+        return [
+            {"hostid": "10", "host": "sw1", "name": "sw1", "inventory_mode": "0", "inventory": {"type": "core-switch"}},
+            # Zabbix returns an empty list as inventory when it is disabled.
+            {"hostid": "11", "host": "sw2", "name": "sw2", "inventory_mode": "-1", "inventory": []},
+        ]
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    hosts = client.get_hosts_by_names(["sw1", "sw2"])
+
+    assert calls[0]["selectInventory"] == ["type"]
+    assert (hosts["sw1"].inventory_mode, hosts["sw1"].inventory_type) == (0, "core-switch")
+    assert (hosts["sw2"].inventory_mode, hosts["sw2"].inventory_type) == (-1, "")
+
+
+def test_set_host_inventory_types_enables_manual_mode_only_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from zabbix_map_sync.models import ZabbixHost
+
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+    calls = []
+    monkeypatch.setattr(client, "_rpc", lambda method, params, auth=True, _retry=True: calls.append((method, params)))
+
+    client.set_host_inventory_types(
+        [
+            (ZabbixHost(hostid="10", host="sw1", name="sw1", inventory_mode=-1), "core-switch"),
+            (ZabbixHost(hostid="11", host="sw2", name="sw2", inventory_mode=1), "access-switch"),
+        ]
+    )
+    client.set_host_inventory_types([])
+
+    assert calls == [
+        (
+            "host.update",
+            [
+                {"hostid": "10", "inventory": {"type": "core-switch"}, "inventory_mode": 0},
+                {"hostid": "11", "inventory": {"type": "access-switch"}},
+            ],
+        )
+    ]
+
+
+def test_get_iconmap_id_filters_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = ZabbixClient(api_url="http://zabbix/api", user="", password="", api_token="token")
+    calls = []
+
+    def fake_rpc(method, params, auth=True, _retry=True):
+        calls.append((method, params))
+        return [{"iconmapid": "7", "name": "Role icons"}] if params["filter"]["name"] == ["Role icons"] else []
+
+    monkeypatch.setattr(client, "_rpc", fake_rpc)
+
+    assert client.get_iconmap_id("Role icons") == "7"
+    assert client.get_iconmap_id("Missing") is None
+    assert calls[0][0] == "iconmap.get"

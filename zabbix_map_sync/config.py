@@ -25,6 +25,17 @@ def _read_required(name: str) -> str:
     return value
 
 
+def _read_bool_env(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigurationError(f"{name} must be true or false, got: {raw!r}")
+
+
 def _read_csv_env(name: str) -> tuple[str, ...]:
     raw = os.getenv(name, "")
     values: list[str] = []
@@ -59,6 +70,8 @@ def load_settings() -> Settings:
         or "skip",
         zabbix_skipped_node_icon_id=os.getenv("ZABBIX_SKIPPED_NODE_ICON_ID", "").strip(),
         zabbix_maps_config=os.getenv("ZABBIX_MAPS_CONFIG", "").strip() or DEFAULT_MAPS_CONFIG_PATH,
+        zabbix_icon_map=os.getenv("ZABBIX_ICON_MAP", "").strip(),
+        zabbix_inventory_role_sync=_read_bool_env("ZABBIX_INVENTORY_ROLE_SYNC"),
     )
     if not settings.zabbix_token and not (settings.zabbix_user and settings.zabbix_password):
         raise ConfigurationError(
@@ -86,6 +99,7 @@ def default_map_definition(settings: Settings) -> MapDefinition:
         ignored_device_roles=settings.netbox_ignored_device_roles,
         skipped_node_mode=settings.zabbix_skipped_node_mode,
         skipped_node_icon_id=settings.zabbix_skipped_node_icon_id,
+        icon_map=settings.zabbix_icon_map,
     )
 
 
@@ -142,6 +156,7 @@ def parse_map_definition(entry, defaults: MapDefinition) -> MapDefinition:
         else defaults.ignored_device_roles,
         skipped_node_mode=skipped_node_mode,
         skipped_node_icon_id=_entry_str(entry, "skipped_node_icon_id", defaults.skipped_node_icon_id),
+        icon_map=_entry_str(entry, "icon_map", defaults.icon_map),
     )
 
 
@@ -158,6 +173,7 @@ def map_definition_to_dict(map_def: MapDefinition) -> dict:
         "ignored_device_roles": list(map_def.ignored_device_roles),
         "skipped_node_mode": map_def.skipped_node_mode,
         "skipped_node_icon_id": map_def.skipped_node_icon_id,
+        "icon_map": map_def.icon_map,
     }
 
 

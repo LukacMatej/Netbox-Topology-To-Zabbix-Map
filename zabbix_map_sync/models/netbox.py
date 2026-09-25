@@ -7,3 +7,5 @@ from dataclasses import dataclass
 class DevicePositionRecord:
     device_id: str
     positions_by_map: dict[str, dict]
+    role_slug: str = ""
+    role_name: str = ""

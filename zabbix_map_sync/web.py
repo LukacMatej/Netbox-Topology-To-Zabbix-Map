@@ -52,6 +52,7 @@ MAP_FORM_FIELDS = (
     "grid_y",
     "skipped_node_mode",
     "skipped_node_icon_id",
+    "icon_map",
 )
 
 
@@ -103,6 +104,7 @@ def _form_values(map_def: MapDefinition) -> dict[str, str]:
         "grid_y": str(map_def.grid_y),
         "skipped_node_mode": map_def.skipped_node_mode,
         "skipped_node_icon_id": map_def.skipped_node_icon_id,
+        "icon_map": map_def.icon_map,
     }
 
 
@@ -117,6 +119,7 @@ def _connection_info(settings: Settings) -> dict[str, str]:
         "zabbix_url": settings.zabbix_url,
         "zabbix_auth": zabbix_auth,
         "maps_config": settings.zabbix_maps_config,
+        "inventory_role_sync": "on" if settings.zabbix_inventory_role_sync else "off",
     }
 
 

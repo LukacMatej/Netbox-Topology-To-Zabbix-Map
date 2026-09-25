@@ -15,7 +15,8 @@ def build_map_payload(**kwargs):
 
 
 class FakeZabbix:
-    def __init__(self, existing_map=None, events=None, hosts_by_id=None) -> None:
+    def __init__(self, existing_map=None, events=None, hosts_by_id=None, hosts_by_name=None, iconmaps=None,
+                 fail_inventory=False) -> None:
         self.created_payload = None
         self.updated_payload = None
         self.update_map_id = None
@@ -26,6 +27,19 @@ class FakeZabbix:
             "102": ZabbixHost(hostid="102", host="Switch 2", name="Switch 2"),
         }
         self.get_hosts_by_ids_calls = []
+        self.hosts_by_name = hosts_by_name
+        self.iconmaps = iconmaps or {}
+        self.inventory_calls = []
+        self.fail_inventory = fail_inventory
+
+    def get_iconmap_id(self, name):
+        return self.iconmaps.get(name)
+
+    def set_host_inventory_types(self, changes):
+        self.events.append("host_inventory")
+        self.inventory_calls.append([(host.hostid, value) for host, value in changes])
+        if self.fail_inventory:
+            raise RuntimeError("Zabbix API error in host.update: No permissions")
 
     def get_hosts_by_ids(self, hostids):
         self.get_hosts_by_ids_calls.append(list(hostids))
@@ -37,6 +51,8 @@ class FakeZabbix:
         return None
 
     def get_hosts_by_names(self, names):
+        if self.hosts_by_name is not None:
+            return self.hosts_by_name
         return {
             "Switch 1": ZabbixHost(hostid="101", host="switch-1", name="Switch 1"),
             "Switch 2": ZabbixHost(hostid="102", host="switch-2", name="Switch 2"),
@@ -700,3 +716,93 @@ def test_sync_without_existing_map_takes_no_snapshot() -> None:
     # Only the final write of the freshly auto-laid-out position.
     assert len(nb.bulk_updates) == 1
     assert nb.bulk_updates[0][0][0] == "901"
+
+
+def _role_records():
+    return {
+        "Switch 1": DevicePositionRecord(device_id="901", positions_by_map={}, role_slug="core-switch"),
+        "Switch 2": DevicePositionRecord(device_id="902", positions_by_map={}, role_slug="access-switch"),
+    }
+
+
+def _inventory_hosts():
+    return {
+        # Inventory disabled and empty -> needs an update (and manual mode).
+        "Switch 1": ZabbixHost(hostid="101", host="Switch 1", name="Switch 1"),
+        # Already correct -> untouched.
+        "Switch 2": ZabbixHost(hostid="102", host="Switch 2", name="Switch 2", inventory_mode=1, inventory_type="access-switch"),
+    }
+
+
+def test_sync_pushes_changed_role_slugs_to_host_inventory_before_map_write() -> None:
+    events = []
+    zbx = FakeZabbix(hosts_by_name=_inventory_hosts(), events=events)
+    nb = FakeNetBox(records=_role_records(), events=events)
+
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(),
+        zabbix=zbx,
+        netbox=nb,
+        map_name="Existing",
+        width=1200,
+        height=800,
+        inventory_role_sync=True,
+    )
+
+    assert zbx.inventory_calls == [[("101", "core-switch")]]
+    assert events.index("host_inventory") < events.index("update_map")
+
+
+def test_sync_leaves_host_inventory_alone_when_role_sync_disabled() -> None:
+    zbx = FakeZabbix(hosts_by_name=_inventory_hosts())
+
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=FakeNetBox(records=_role_records()),
+        map_name="Existing", width=1200, height=800,
+    )
+
+    assert zbx.inventory_calls == []
+
+
+def test_sync_truncates_long_role_slug_and_survives_inventory_failure() -> None:
+    records = {"Switch 1": DevicePositionRecord(device_id="901", positions_by_map={}, role_slug="x" * 80)}
+    zbx = FakeZabbix(hosts_by_name=_inventory_hosts(), fail_inventory=True)
+
+    result = sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=FakeNetBox(records=records),
+        map_name="Existing", width=1200, height=800, inventory_role_sync=True,
+    )
+
+    assert zbx.inventory_calls == [[("101", "x" * 64)]]
+    assert result.created is False
+    assert zbx.updated_payload is not None
+
+
+def test_sync_attaches_icon_map_only_when_configured() -> None:
+    zbx = FakeZabbix(iconmaps={"Role icons": "7"})
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=FakeNetBox(),
+        map_name="Existing", width=1200, height=800, icon_map="Role icons",
+    )
+    assert zbx.updated_payload["iconmapid"] == "7"
+
+    zbx = FakeZabbix(iconmaps={"Role icons": "7"})
+    sync_topology_to_zabbix_map(
+        graph=_two_switch_graph(), zabbix=zbx, netbox=FakeNetBox(),
+        map_name="Existing", width=1200, height=800,
+    )
+    # Not sent at all, so an icon map picked by hand in Zabbix is kept by map.update.
+    assert "iconmapid" not in zbx.updated_payload
+
+
+def test_sync_fails_clearly_for_unknown_icon_map() -> None:
+    import pytest
+
+    zbx = FakeZabbix()
+
+    with pytest.raises(ValueError, match="icon map 'Missing' not found"):
+        sync_topology_to_zabbix_map(
+            graph=_two_switch_graph(), zabbix=zbx, netbox=FakeNetBox(),
+            map_name="Existing", width=1200, height=800, icon_map="Missing",
+        )
+    assert zbx.updated_payload is None

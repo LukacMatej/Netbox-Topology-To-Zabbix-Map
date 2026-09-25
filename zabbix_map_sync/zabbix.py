@@ -16,6 +16,22 @@ class ZabbixAPIError(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
+def _host_from_api(item: dict) -> ZabbixHost:
+    # Zabbix returns inventory as [] (not {}) for hosts with inventory disabled.
+    inventory = item.get("inventory") if isinstance(item.get("inventory"), dict) else {}
+    try:
+        inventory_mode = int(item.get("inventory_mode", -1))
+    except (TypeError, ValueError):
+        inventory_mode = -1
+    return ZabbixHost(
+        hostid=item["hostid"],
+        host=item["host"],
+        name=item.get("name", item["host"]),
+        inventory_mode=inventory_mode,
+        inventory_type=str(inventory.get("type") or ""),
+    )
+
+
 class ZabbixClient:
     def __init__(
         self,
@@ -94,14 +110,15 @@ class ZabbixClient:
         result = self._rpc(
             "host.get",
             {
-                "output": ["hostid", "host", "name"],
+                "output": ["hostid", "host", "name", "inventory_mode"],
+                "selectInventory": ["type"],
                 "filter": {"host": names},
             },
         )
 
         hosts: dict[str, ZabbixHost] = {}
         for item in result:
-            host = ZabbixHost(hostid=item["hostid"], host=item["host"], name=item.get("name", item["host"]))
+            host = _host_from_api(item)
             hosts[item["host"]] = host
             hosts[item.get("name", item["host"])] = host
         logger.debug("Resolved %s Zabbix host lookup entries", len(hosts))
@@ -125,6 +142,27 @@ class ZabbixClient:
             item["hostid"]: ZabbixHost(hostid=item["hostid"], host=item["host"], name=item.get("name", item["host"]))
             for item in result
         }
+
+    def get_iconmap_id(self, name: str) -> str | None:
+        result = self._rpc("iconmap.get", {"output": ["iconmapid", "name"], "filter": {"name": [name]}})
+        return str(result[0]["iconmapid"]) if result else None
+
+    def set_host_inventory_types(self, changes: list[tuple[ZabbixHost, str]]) -> None:
+        """Set inventory field "type" on hosts in one host.update call.
+
+        Hosts with inventory disabled are switched to manual mode, otherwise
+        the value cannot be stored; automatic mode is left as it is.
+        """
+        if not changes:
+            return
+        params = []
+        for host, inventory_type in changes:
+            entry: dict = {"hostid": host.hostid, "inventory": {"type": inventory_type}}
+            if host.inventory_mode == -1:
+                entry["inventory_mode"] = 0
+            params.append(entry)
+        logger.info("Updating Zabbix host inventory type count=%s", len(params))
+        self._rpc("host.update", params)
 
     def get_map_by_name(self, map_name: str) -> ZabbixMap | None:
         logger.debug("Looking up existing map name=%s", map_name)

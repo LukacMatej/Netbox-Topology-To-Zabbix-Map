@@ -124,6 +124,8 @@ Volitelne promenne (promenne mapy jsou vychozi hodnoty weboveho formulare):
 - ZABBIX_SKIPPED_NODE_MODE (vychozi: skip; jedna z hodnot skip, image)
 - ZABBIX_SKIPPED_NODE_ICON_ID (ID ikony pro uzly v rezimu image; vychozi je vestavena ikona hostu)
 - ZABBIX_MAPS_CONFIG (vychozi: maps.json; soubor s ulozenymi definicemi map)
+- ZABBIX_ICON_MAP (vychozi nazev icon mapy pro nove mapy; prazdne = nastaveni icon mapy na mape se nemeni)
+- ZABBIX_INVENTORY_ROLE_SYNC (vychozi: false; zapis slugu role zarizeni z NetBoxu do inventare hostu v Zabbixu, pole "Type")
 - LOG_LEVEL (vychozi: DEBUG)
 
 ### Rezim vynechanych uzlu
@@ -139,6 +141,21 @@ token "PP") se z topologie odstrani pouze pokud je `patchpanel` uvedeno v
 `NETBOX_IGNORED_DEVICE_ROLES`. Pokud je tato volba zapnuta, kazdy patch panel se z topologie
 vyjme a jeho dva kabely se propoji primo mezi zarizenimi na obou stranach, takze mapa zobrazuje
 vysledne spojeni misto prostredniho panelu.
+
+## Ikony hostu (Zabbix icon mapping)
+
+Ikony hostu vybira primo Zabbix pomoci icon mapy (Administration > General > Icon mapping):
+
+1. Vytvorte icon mapu s mapovanim na inventarni pole **Type**, jedno pro kazdy slug role zarizeni v NetBoxu.
+   Vyrazy jsou regularni vyrazy a hledaji shodu kdekoli v hodnote, proto je ukotvete, napr. `^core-switch$`.
+   Nastavte *Default* ikonu pro ostatni.
+2. Nastavte `ZABBIX_INVENTORY_ROLE_SYNC=true`. Pri kazde synchronizaci se slug role zapise do inventarniho
+   pole Type sparovaneho hostu v Zabbixu (jen pokud se lisi). Hostum s vypnutym inventarem se zapne rucni
+   rezim; hoste v automatickem rezimu ho ponechaji. Vyzaduje API token typu Admin nebo Super admin.
+3. Zadejte nazev icon mapy ve formulari mapy (vychozi z `ZABBIX_ICON_MAP`).
+
+Icon mapping plati jen pro prvky typu host; nesparovane uzly zobrazene jako obrazky pouzivaji
+`ZABBIX_SKIPPED_NODE_ICON_ID`.
 
 ## Mapovani triggeru linek
 

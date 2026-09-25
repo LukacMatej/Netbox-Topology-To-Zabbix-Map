@@ -73,6 +73,7 @@ def _form(**overrides) -> dict:
         "grid_y": "40",
         "skipped_node_mode": "image",
         "skipped_node_icon_id": "",
+        "icon_map": "Role icons",
     }
     data.update(overrides)
     return data
@@ -130,6 +131,8 @@ def test_save_persists_map_syncs_it_and_refreshes_list(maps_file, client, sync_c
     assert [entry["name"] for entry in saved] == ["Core"]
     assert saved[0]["width"] == 1600
     assert saved[0]["skipped_node_mode"] == "image"
+    assert saved[0]["icon_map"] == "Role icons"
+    assert "Role icons" in response.text
 
 
 def test_save_rejects_invalid_input(maps_file, client, sync_calls) -> None:

@@ -3,7 +3,7 @@
   {% if saved_maps %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Name</th><th>Filter query</th><th>Tag</th><th>Ignored roles</th><th>Size</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Filter query</th><th>Tag</th><th>Ignored roles</th><th>Icon map</th><th>Size</th><th></th></tr></thead>
       <tbody>
         {% for m in saved_maps %}
         <tr>
@@ -11,6 +11,7 @@
           <td>{% if m.topology_query %}<code>{{ m.topology_query }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
           <td>{{ m.required_tag or "—" }}</td>
           <td>{{ m.ignored_device_roles | join(", ") or "—" }}</td>
+          <td>{{ m.icon_map or "—" }}</td>
           <td class="num">{{ m.width }}&times;{{ m.height }}</td>
           <td class="row-actions">
             <button class="small" hx-post="/maps/sync" hx-vals='{{ {"name": m.name} | tojson }}' hx-target="#result" hx-disabled-elt="this">Sync</button>

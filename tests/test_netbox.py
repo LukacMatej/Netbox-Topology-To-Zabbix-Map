@@ -625,3 +625,28 @@ def test_set_device_custom_fields_bulk_sends_integer_ids(monkeypatch) -> None:
     assert captured["url"] == "http://netbox.local/api/dcim/devices/"
     # A string id would match no object in NetBox's bulk_update and fail with 400 "No data provided".
     assert captured["json"] == [{"id": 901, "custom_fields": {"zabbix_map_coordinates": {"Core": {"x": 1, "y": 2}}}}]
+
+
+def test_fetch_device_position_records_reads_positions_and_role(monkeypatch) -> None:
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    payload = {
+        "results": [
+            {
+                "id": 901,
+                "name": "sw1",
+                "role": {"id": 3, "name": "Core Switch", "slug": "core-switch"},
+                "custom_fields": {"zabbix_map_coordinates": {"Core": {"x": 1, "y": 2}}},
+            },
+            {"id": 902, "name": "sw2", "role": None, "custom_fields": {"zabbix_map_coordinates": None}},
+        ]
+    }
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: FakeResponse(json_data=payload))
+
+    records = client.fetch_device_position_records(["sw1", "sw2"])
+
+    assert records["sw1"] == DevicePositionRecord(
+        device_id="901", positions_by_map={"Core": {"x": 1, "y": 2}}, role_slug="core-switch", role_name="Core Switch"
+    )
+    assert records["sw2"].role_slug == ""

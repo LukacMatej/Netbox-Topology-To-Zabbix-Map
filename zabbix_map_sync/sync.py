@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from collections import deque
+from dataclasses import replace
 
 from .models import (
     ELEMENT_TYPE_HOST,
@@ -334,6 +335,7 @@ def build_zabbix_map(
     skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
     skipped_node_icon_id: str = "",
     stored_positions: dict[str, tuple[int, int]] | None = None,
+    iconmapid: str | None = None,
 ) -> tuple[ZabbixMap, int, int, int, int, tuple[str, ...], dict[str, tuple[int, int]]]:
     fixed_positions = _resolve_fixed_positions(graph, hosts_by_name, existing_map, stored_positions or {})
     positions = _layout_positions(graph, width, height, grid_x, grid_y, fixed_positions=fixed_positions)
@@ -600,6 +602,7 @@ def build_zabbix_map(
         height=height,
         selements=tuple(selements),
         links=tuple(links),
+        iconmapid=iconmapid,
         label_format=label_format,
         label_type_image=label_type_image,
     )
@@ -624,6 +627,51 @@ def build_zabbix_map(
         unresolved_details,
         final_positions_by_device_name,
     )
+
+
+INVENTORY_TYPE_MAX_LENGTH = 64
+
+
+def _sync_host_inventory_roles(
+    zabbix: ZabbixClient,
+    hosts_by_name,
+    position_records: dict[str, DevicePositionRecord],
+    device_names: list[str],
+) -> int:
+    """Write each matched device's NetBox role slug to its Zabbix host inventory "type".
+
+    Icon maps on the Zabbix side pick the element icon from that field. Only
+    hosts whose value differs are updated; a failure is logged, never fatal.
+    """
+    changes = []
+    seen_hostids: set[str] = set()
+    for device_name in device_names:
+        host = hosts_by_name.get(device_name)
+        record = position_records.get(device_name)
+        if host is None or record is None or not record.role_slug or host.hostid in seen_hostids:
+            continue
+        seen_hostids.add(host.hostid)
+        desired = record.role_slug[:INVENTORY_TYPE_MAX_LENGTH]
+        if host.inventory_type == desired and host.inventory_mode != -1:
+            continue
+        logger.info(
+            "Host inventory type change host=%s hostid=%s %r -> %r%s",
+            host.host,
+            host.hostid,
+            host.inventory_type,
+            desired,
+            " (enabling manual inventory)" if host.inventory_mode == -1 else "",
+        )
+        changes.append((host, desired))
+
+    if not changes:
+        return 0
+    try:
+        zabbix.set_host_inventory_types(changes)
+    except Exception:
+        logger.exception("Failed to update Zabbix host inventory types count=%s", len(changes))
+        return 0
+    return len(changes)
 
 
 def _live_positions_by_device_name(existing_map: ZabbixMap, zabbix: ZabbixClient) -> dict[str, tuple[int, int]]:
@@ -677,7 +725,7 @@ def _persist_device_positions(
                 pass
 
         merged = {**record.positions_by_map, map_name: {"x": x, "y": y}}
-        merged_records[device_name] = DevicePositionRecord(device_id=record.device_id, positions_by_map=merged)
+        merged_records[device_name] = replace(record, positions_by_map=merged)
         updates.append((record.device_id, merged))
 
     if not updates:
@@ -706,12 +754,20 @@ def sync_topology_to_zabbix_map(
     skipped_node_mode: str = SKIPPED_NODE_MODE_SKIP,
     skipped_node_icon_id: str = "",
     position_field_name: str = DEFAULT_POSITION_FIELD,
+    icon_map: str = "",
+    inventory_role_sync: bool = False,
 ) -> SyncResult:
     topology_names = sorted({node.label for node in graph.nodes if node.label})
     logger.debug("Syncing topology labels=%s", topology_names)
     hosts = zabbix.get_hosts_by_names(topology_names)
 
     existing_map = zabbix.get_map_by_name(map_name)
+
+    iconmapid = None
+    if icon_map:
+        iconmapid = zabbix.get_iconmap_id(icon_map)
+        if iconmapid is None:
+            raise ValueError(f"Zabbix icon map {icon_map!r} not found (Administration > General > Icon mapping)")
 
     # Snapshot where elements currently sit on the live map (possibly moved by
     # hand in Zabbix) into NetBox before anything is rewritten -- including
@@ -729,6 +785,9 @@ def sync_topology_to_zabbix_map(
         stage="live",
     )
     stored_positions = positions_for_map(position_records, map_name)
+
+    if inventory_role_sync:
+        _sync_host_inventory_roles(zabbix, hosts, position_records, topology_names)
 
     (
         zabbix_map,
@@ -751,6 +810,7 @@ def sync_topology_to_zabbix_map(
         skipped_node_mode=skipped_node_mode,
         skipped_node_icon_id=skipped_node_icon_id,
         stored_positions=stored_positions,
+        iconmapid=iconmapid,
     )
 
     created = existing_map is None
