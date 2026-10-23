@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import itertools
 import logging
-from dataclasses import dataclass
 from typing import Any, Literal
 
 import requests
+
+from .models import ZabbixHost, ZabbixMap
 
 
 class ZabbixAPIError(RuntimeError):
@@ -15,11 +16,20 @@ class ZabbixAPIError(RuntimeError):
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class ZabbixHost:
-    hostid: str
-    host: str
-    name: str
+def _host_from_api(item: dict) -> ZabbixHost:
+    # Zabbix returns inventory as [] (not {}) for hosts with inventory disabled.
+    inventory = item.get("inventory") if isinstance(item.get("inventory"), dict) else {}
+    try:
+        inventory_mode = int(item.get("inventory_mode", -1))
+    except (TypeError, ValueError):
+        inventory_mode = -1
+    return ZabbixHost(
+        hostid=item["hostid"],
+        host=item["host"],
+        name=item.get("name", item["host"]),
+        inventory_mode=inventory_mode,
+        inventory_type=str(inventory.get("type") or ""),
+    )
 
 
 class ZabbixClient:
@@ -100,20 +110,61 @@ class ZabbixClient:
         result = self._rpc(
             "host.get",
             {
-                "output": ["hostid", "host", "name"],
+                "output": ["hostid", "host", "name", "inventory_mode"],
+                "selectInventory": ["type"],
                 "filter": {"host": names},
             },
         )
 
         hosts: dict[str, ZabbixHost] = {}
         for item in result:
-            host = ZabbixHost(hostid=item["hostid"], host=item["host"], name=item.get("name", item["host"]))
+            host = _host_from_api(item)
             hosts[item["host"]] = host
             hosts[item.get("name", item["host"])] = host
         logger.debug("Resolved %s Zabbix host lookup entries", len(hosts))
         return hosts
 
-    def get_map_by_name(self, map_name: str) -> dict | None:
+    def get_hosts_by_ids(self, hostids: list[str]) -> dict[str, ZabbixHost]:
+        """Hosts keyed by hostid, e.g. to name the host elements of an existing map."""
+        unique_ids = sorted({str(hostid) for hostid in hostids if hostid})
+        if not unique_ids:
+            return {}
+
+        logger.debug("Fetching Zabbix hosts for %s hostids", len(unique_ids))
+        result = self._rpc(
+            "host.get",
+            {
+                "output": ["hostid", "host", "name"],
+                "hostids": unique_ids,
+            },
+        )
+        return {
+            item["hostid"]: ZabbixHost(hostid=item["hostid"], host=item["host"], name=item.get("name", item["host"]))
+            for item in result
+        }
+
+    def get_iconmap_id(self, name: str) -> str | None:
+        result = self._rpc("iconmap.get", {"output": ["iconmapid", "name"], "filter": {"name": [name]}})
+        return str(result[0]["iconmapid"]) if result else None
+
+    def set_host_inventory_types(self, changes: list[tuple[ZabbixHost, str]]) -> None:
+        """Set inventory field "type" on hosts in one host.update call.
+
+        Hosts with inventory disabled are switched to manual mode, otherwise
+        the value cannot be stored; automatic mode is left as it is.
+        """
+        if not changes:
+            return
+        params = []
+        for host, inventory_type in changes:
+            entry: dict = {"hostid": host.hostid, "inventory": {"type": inventory_type}}
+            if host.inventory_mode == -1:
+                entry["inventory_mode"] = 0
+            params.append(entry)
+        logger.info("Updating Zabbix host inventory type count=%s", len(params))
+        self._rpc("host.update", params)
+
+    def get_map_by_name(self, map_name: str) -> ZabbixMap | None:
         logger.debug("Looking up existing map name=%s", map_name)
         maps = self._rpc(
             "map.get",
@@ -128,7 +179,7 @@ class ZabbixClient:
             logger.debug("Map name=%s does not exist", map_name)
             return None
         logger.debug("Found existing map name=%s sysmapid=%s", map_name, maps[0].get("sysmapid"))
-        return maps[0]
+        return ZabbixMap.from_api(maps[0])
 
     def find_trigger_id(self, hostids: list[str], trigger_name: str, match: str = "auto") -> str | None:
         if not hostids or not trigger_name.strip():
@@ -200,25 +251,25 @@ class ZabbixClient:
             },
         )
 
-    def create_map(self, payload: dict) -> dict:
+    def create_map(self, zabbix_map: ZabbixMap) -> dict:
         logger.info(
             "Creating Zabbix map name=%s selements=%s links=%s",
-            payload.get("name"),
-            len(payload.get("selements", []) or []),
-            len(payload.get("links", []) or []),
+            zabbix_map.name,
+            len(zabbix_map.selements),
+            len(zabbix_map.links),
         )
-        return self._rpc("map.create", payload)
+        return self._rpc("map.create", zabbix_map.to_api_payload())
 
     def delete_map(self, mapid: str) -> dict:
         return self._rpc("map.delete", [mapid])
 
-    def update_map(self, mapid: str, payload: dict) -> dict:
-        update_payload = {"sysmapid": mapid, **payload}
+    def update_map(self, mapid: str, zabbix_map: ZabbixMap) -> dict:
+        update_payload = {"sysmapid": mapid, **zabbix_map.to_api_payload()}
         logger.info(
             "Updating Zabbix map sysmapid=%s name=%s selements=%s links=%s",
             mapid,
-            payload.get("name"),
-            len(payload.get("selements", []) or []),
-            len(payload.get("links", []) or []),
+            zabbix_map.name,
+            len(zabbix_map.selements),
+            len(zabbix_map.links),
         )
         return self._rpc("map.update", update_payload)

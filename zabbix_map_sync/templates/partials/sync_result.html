@@ -1,0 +1,40 @@
+<div class="card" id="result-card">
+  <h2>Result</h2>
+  {% if error %}
+  <div class="banner error">{{ error }}</div>
+  {% endif %}
+  {% if results %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Map</th><th>Status</th><th>Nodes</th><th>Matched hosts</th><th>Image</th><th>Skipped</th><th>Links</th></tr></thead>
+      <tbody>
+        {% for r in results %}
+        <tr>
+          <td>{{ r.map_name }}</td>
+          {% if r.error is defined %}
+          <td colspan="6"><span class="status-error">failed</span> {{ r.error }}</td>
+          {% elif r.created is not defined %}
+          <td><span class="status-ok">preview</span></td>
+          <td class="num">{{ r.total_nodes }}</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td class="num">{{ r.total_links }}</td>
+          {% else %}
+          <td>
+            <span class="status-ok">{{ "created" if r.created else "updated" }}</span>
+            {% if r.unresolved_link_rules %}
+            <ul class="warnings">{% for detail in r.unresolved_link_rule_details %}<li>Unresolved {{ detail }}</li>{% endfor %}</ul>
+            {% endif %}
+          </td>
+          <td class="num">{{ r.total_nodes }}</td>
+          <td class="num">{{ r.matched_hosts }}</td>
+          <td class="num">{{ r.image_nodes }}</td>
+          <td class="num">{{ r.skipped_nodes }}</td>
+          <td class="num">{{ r.total_links }}</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% if refresh_maps %}{% with oob = true %}{% include "partials/maps_list.html" %}{% endwith %}{% endif %}

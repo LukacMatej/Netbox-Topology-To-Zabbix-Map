@@ -1,13 +1,16 @@
 import pytest
 
-from zabbix_map_sync.models import TopologyGraph
+from zabbix_map_sync.models import DevicePositionRecord, TopologyGraph
 from zabbix_map_sync.netbox import (
     NetBoxClient,
     _clean_xml_label,
+    _coerce_position_entry,
     _merge_query_defaults,
+    _normalize_positions_by_map,
     _parse_topology_json,
     _parse_topology_xml,
     _tag_variants,
+    positions_for_map,
 )
 
 
@@ -581,3 +584,69 @@ def test_fetch_topology_xml_batches_cable_detail_fetch(monkeypatch: pytest.Monke
     assert len(detail_fetch_urls) == 1
     assert calls["count"] == 4
     assert {edge.trigger_names for edge in graph.edges} == {("trigger1",), ("trigger2",)}
+
+
+def test_fetch_topology_error_includes_netbox_error_body(monkeypatch) -> None:
+    import requests
+
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    response = requests.Response()
+    response.status_code = 500
+    response.reason = "Internal Server Error"
+    response.url = "http://netbox.local/api/plugins/netbox_topology_views/xml-export/?show_cables=True"
+    response._content = b'{"error": "boom", "exception": "KeyError", "netbox_version": "4.4.0"}'
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: response)
+
+    with pytest.raises(requests.HTTPError, match="KeyError") as exc_info:
+        client.fetch_topology(path="/api/plugins/netbox_topology_views/xml-export/")
+
+    assert exc_info.value.response is response
+    assert "500 Internal Server Error" in str(exc_info.value)
+
+
+def test_set_device_custom_fields_bulk_sends_integer_ids(monkeypatch) -> None:
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    captured = {}
+
+    def fake_patch(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse(json_data=[])
+
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "patch", fake_patch)
+
+    client.set_device_custom_fields_bulk([("901", {"Core": {"x": 1, "y": 2}})], field_name="zabbix_map_coordinates")
+
+    assert captured["url"] == "http://netbox.local/api/dcim/devices/"
+    # A string id would match no object in NetBox's bulk_update and fail with 400 "No data provided".
+    assert captured["json"] == [{"id": 901, "custom_fields": {"zabbix_map_coordinates": {"Core": {"x": 1, "y": 2}}}}]
+
+
+def test_fetch_device_position_records_reads_positions_and_role(monkeypatch) -> None:
+    from zabbix_map_sync.netbox import NetBoxClient
+
+    payload = {
+        "results": [
+            {
+                "id": 901,
+                "name": "sw1",
+                "role": {"id": 3, "name": "Core Switch", "slug": "core-switch"},
+                "custom_fields": {"zabbix_map_coordinates": {"Core": {"x": 1, "y": 2}}},
+            },
+            {"id": 902, "name": "sw2", "role": None, "custom_fields": {"zabbix_map_coordinates": None}},
+        ]
+    }
+    client = NetBoxClient(base_url="http://netbox.local", token="token")
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: FakeResponse(json_data=payload))
+
+    records = client.fetch_device_position_records(["sw1", "sw2"])
+
+    assert records["sw1"] == DevicePositionRecord(
+        device_id="901", positions_by_map={"Core": {"x": 1, "y": 2}}, role_slug="core-switch", role_name="Core Switch"
+    )
+    assert records["sw2"].role_slug == ""

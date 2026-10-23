@@ -1,33 +1,15 @@
 from __future__ import annotations
 
-import html
 import logging
-from dataclasses import dataclass
 
-from .config import Settings
+from .models import CableTriggerContext, Settings, TriggerChoice
 from .netbox import NetBoxClient
-from .ui import render_banner, render_page
 from .zabbix import ZabbixClient
 
 
 logger = logging.getLogger(__name__)
 
 TRIGGER_CUSTOM_FIELD = "zabbix_triggers"
-
-
-@dataclass(frozen=True)
-class TriggerChoice:
-    triggerid: str
-    description: str
-
-
-@dataclass(frozen=True)
-class CableTriggerContext:
-    cable_id: str
-    device_a: str
-    device_b: str
-    selected_triggers: tuple[str, ...]
-    available_triggers: tuple[TriggerChoice, ...]
 
 
 def _device_name(device: dict | None) -> str:
@@ -90,36 +72,6 @@ def save_cable_trigger_selection(netbox: NetBoxClient, cable_id: str, trigger_na
     netbox.set_cable_custom_field(cable_id, TRIGGER_CUSTOM_FIELD, cleaned)
 
 
-def render_trigger_picker_html(context: CableTriggerContext, saved: bool = False) -> str:
-    selected = set(context.selected_triggers)
-    rows: list[str] = []
-    for choice in context.available_triggers:
-        checked = " checked" if choice.description in selected else ""
-        rows.append(
-            "<label class='trigger'>"
-            f"<input type='checkbox' name='trigger' value=\"{html.escape(choice.description)}\"{checked}>"
-            f"<span>{html.escape(choice.description)}</span></label>"
-        )
-    list_html = (
-        "".join(rows) if rows else "<p class='empty'>No Zabbix triggers found for these two hosts.</p>"
-    )
-
-    banner_html = render_banner("Saved.") if saved else ""
-
-    body = (
-        f"<h1>Link triggers</h1>"
-        f"<p class='subtitle'>{html.escape(context.device_a)} &harr; {html.escape(context.device_b)}</p>"
-        f"{banner_html}"
-        f"<form method='post' action='/cables/{html.escape(context.cable_id)}/triggers'>"
-        "<div class='card'>"
-        f"<div class='trigger-list'>{list_html}</div>"
-        "<button type='submit'>Save</button>"
-        "</div>"
-        "</form>"
-    )
-    return render_page(f"Link triggers &ndash; {html.escape(context.device_a)} / {html.escape(context.device_b)}", body)
-
-
 def _build_netbox_client(settings: Settings) -> NetBoxClient:
     return NetBoxClient(base_url=settings.netbox_url, token=settings.netbox_token)
 
@@ -135,11 +87,10 @@ def _build_zabbix_client(settings: Settings) -> ZabbixClient:
     return zabbix
 
 
-def get_cable_trigger_page(settings: Settings, cable_id: str, saved: bool = False) -> str:
+def get_cable_trigger_context(settings: Settings, cable_id: str) -> CableTriggerContext:
     netbox = _build_netbox_client(settings)
     zabbix = _build_zabbix_client(settings)
-    context = load_cable_trigger_context(netbox, zabbix, cable_id)
-    return render_trigger_picker_html(context, saved=saved)
+    return load_cable_trigger_context(netbox, zabbix, cable_id)
 
 
 def apply_cable_trigger_selection(settings: Settings, cable_id: str, trigger_names: list[str]) -> None:

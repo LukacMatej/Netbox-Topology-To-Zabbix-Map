@@ -10,11 +10,13 @@ from xml.etree import ElementTree as ET
 
 import requests
 
-from .models import TopologyEdge, TopologyGraph, TopologyNode
+from .models import DevicePositionRecord, TopologyEdge, TopologyGraph, TopologyNode
 
 
 logger = logging.getLogger(__name__)
 ENRICHMENT_MARKER = "cable-detail-v2"
+DEFAULT_POSITION_FIELD = "zabbix_map_coordinates"
+DEVICE_NAME_FETCH_CHUNK_SIZE = 100
 
 
 def _is_patch_panel_label(label: str) -> bool:
@@ -39,6 +41,27 @@ def _merge_trigger_name_tuples(*trigger_sets: tuple[str, ...]) -> tuple[str, ...
             if name not in merged:
                 merged.append(name)
     return tuple(merged)
+
+
+ERROR_BODY_LOG_LIMIT = 1000
+
+
+def _raise_for_status(response: requests.Response) -> None:
+    """Like ``raise_for_status`` but keeps NetBox's error body in the message.
+
+    NetBox answers API server errors with a short JSON body naming the
+    exception (e.g. from a plugin view); without it a 500 is undiagnosable.
+    """
+    if response.ok:
+        return
+    body = (response.text or "").strip()[:ERROR_BODY_LOG_LIMIT]
+    logger.error(
+        "NetBox request failed status=%s url=%s body=%s", response.status_code, response.url, body or "<empty>"
+    )
+    message = f"{response.status_code} {response.reason} for url: {response.url}"
+    if body:
+        message += f" | NetBox response: {body}"
+    raise requests.HTTPError(message, response=response)
 
 
 def _next_page_url(base_url: str, next_value) -> str | None:
@@ -90,6 +113,40 @@ def _normalize_trigger_names(value) -> tuple[str, ...]:
     if items:
         logger.debug("Normalized trigger names raw=%r normalized=%s", value, items)
     return tuple(items)
+
+
+def _normalize_positions_by_map(value) -> dict[str, dict]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Could not parse stored device position JSON value=%r", value)
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_position_entry(entry) -> tuple[int, int] | None:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return int(entry["x"]), int(entry["y"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Malformed stored device position entry=%r", entry)
+        return None
+
+
+def positions_for_map(
+    records: dict[str, DevicePositionRecord], map_name: str
+) -> dict[str, tuple[int, int]]:
+    positions: dict[str, tuple[int, int]] = {}
+    for device_name, record in records.items():
+        xy = _coerce_position_entry(record.positions_by_map.get(map_name))
+        if xy is not None:
+            positions[device_name] = xy
+    return positions
 
 
 def _extract_edge_trigger_names(edge: dict) -> tuple[str, ...]:
@@ -255,7 +312,7 @@ class NetBoxClient:
         while True:
             logger.debug("Fetching paginated NetBox endpoint url=%s params=%s", url, current_params or None)
             response = self.session.get(url, params=current_params or None, timeout=self.timeout)
-            response.raise_for_status()
+            _raise_for_status(response)
             payload = response.json()
 
             if isinstance(payload, dict) and isinstance(payload.get("results"), list):
@@ -289,7 +346,7 @@ class NetBoxClient:
 
         devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
         response = self.session.get(devices_url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
 
         by_id: dict[str, dict] = {}
@@ -312,7 +369,7 @@ class NetBoxClient:
         cables_url = urljoin(f"{self.base_url}/", "api/dcim/cables/")
         logger.debug("Batch-fetching cable details count=%s", len(cable_ids))
         response = self.session.get(cables_url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
 
         by_id: dict[str, dict] = {}
@@ -331,7 +388,7 @@ class NetBoxClient:
         url = urljoin(f"{self.base_url}/", f"api/dcim/cables/{cable_id}/")
         logger.debug("Fetching NetBox cable url=%s", url)
         response = self.session.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected NetBox cable response for cable_id={cable_id}")
@@ -347,7 +404,7 @@ class NetBoxClient:
         try:
             logger.debug("Resolving termination endpoint url=%s", normalized_url)
             response = self.session.get(normalized_url, timeout=self.timeout)
-            response.raise_for_status()
+            _raise_for_status(response)
             payload = response.json()
         except Exception as exc:
             logger.debug("Could not resolve endpoint url=%s error=%s", normalized_url, exc)
@@ -397,6 +454,90 @@ class NetBoxClient:
             )
         return response.json()
 
+    def fetch_device_position_records(
+        self, device_names: list[str], field_name: str = DEFAULT_POSITION_FIELD
+    ) -> dict[str, DevicePositionRecord]:
+        unique_names = sorted({name.strip() for name in device_names if name and name.strip()})
+        if not unique_names:
+            return {}
+
+        devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
+        records: dict[str, DevicePositionRecord] = {}
+
+        for start in range(0, len(unique_names), DEVICE_NAME_FETCH_CHUNK_SIZE):
+            chunk = unique_names[start : start + DEVICE_NAME_FETCH_CHUNK_SIZE]
+            params: list[tuple[str, str | int]] = [("limit", 0)]
+            for name in chunk:
+                params.append(("name", name))
+
+            logger.debug("Batch-fetching device positions count=%s", len(chunk))
+            response = self.session.get(devices_url, params=params, timeout=self.timeout)
+            _raise_for_status(response)
+            payload = response.json()
+
+            for item in payload.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                device_name = str(item.get("name", "")).strip()
+                device_id = str(item.get("id", "")).strip()
+                if not device_name or not device_id:
+                    continue
+                custom_fields = item.get("custom_fields") if isinstance(item.get("custom_fields"), dict) else {}
+                positions_by_map = _normalize_positions_by_map(custom_fields.get(field_name))
+                role_slug, role_name = _extract_device_role(item)
+                records[device_name] = DevicePositionRecord(
+                    device_id=device_id,
+                    positions_by_map=positions_by_map,
+                    role_slug=role_slug,
+                    role_name=role_name,
+                )
+
+        logger.debug("Fetched device position records count=%s", len(records))
+        return records
+
+    def set_device_custom_field(self, device_id: str | int, field_name: str, value) -> dict:
+        url = urljoin(f"{self.base_url}/", f"api/dcim/devices/{device_id}/")
+        payload = {"custom_fields": {field_name: value}}
+        logger.info("Updating NetBox device custom field device_id=%s field=%s", device_id, field_name)
+        response = self.session.patch(url, json=payload, timeout=self.timeout)
+        if not response.ok:
+            logger.error(
+                "NetBox rejected device custom field update device_id=%s field=%s status=%s body=%s",
+                device_id,
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected update to device_id={device_id} field={field_name}: "
+                f"{response.status_code} {response.text}"
+            )
+        return response.json()
+
+    def set_device_custom_fields_bulk(
+        self, updates: list[tuple[str, dict]], field_name: str = DEFAULT_POSITION_FIELD
+    ) -> None:
+        if not updates:
+            return
+
+        devices_url = urljoin(f"{self.base_url}/", "api/dcim/devices/")
+        # NetBox matches bulk-update entries to objects by integer pk
+        # (update_data.get(obj.id)); a string id silently matches nothing and the
+        # whole request fails with 400 "No data provided".
+        body = [{"id": int(device_id), "custom_fields": {field_name: value}} for device_id, value in updates]
+        logger.info("Bulk-updating NetBox device custom field field=%s count=%s", field_name, len(body))
+        response = self.session.patch(devices_url, json=body, timeout=self.timeout)
+        if not response.ok:
+            logger.error(
+                "NetBox rejected bulk device custom field update field=%s status=%s body=%s",
+                field_name,
+                response.status_code,
+                response.text,
+            )
+            raise ValueError(
+                f"NetBox rejected bulk update field={field_name}: {response.status_code} {response.text}"
+            )
+
     def fetch_topology(self, path: str, query: str = "") -> TopologyGraph:
         path = path if path.startswith("/") else f"/{path}"
         url = urljoin(f"{self.base_url}/", path.lstrip("/"))
@@ -416,7 +557,7 @@ class NetBoxClient:
         logger.info("Fetching NetBox topology url=%s", url)
 
         response = self.session.get(url, timeout=self.timeout)
-        response.raise_for_status()
+        _raise_for_status(response)
         content_type = response.headers.get("Content-Type", "").lower()
         logger.debug("NetBox topology response content_type=%s", content_type)
         if "xml" in content_type:
@@ -609,7 +750,7 @@ class NetBoxClient:
             try:
                 logger.debug("Resolving termination endpoint url=%s", normalized_url)
                 endpoint_response = self.session.get(normalized_url, timeout=self.timeout)
-                endpoint_response.raise_for_status()
+                _raise_for_status(endpoint_response)
                 endpoint_payload = endpoint_response.json()
             except Exception as exc:
                 logger.debug("Could not resolve endpoint url=%s error=%s", normalized_url, exc)
@@ -890,6 +1031,18 @@ class NetBoxClient:
             len(deduplicated_edges),
         )
         return TopologyGraph(nodes=list(node_by_id.values()), edges=deduplicated_edges)
+
+
+def _extract_device_role(device: dict) -> tuple[str, str]:
+    """(slug, name) of a device's role; NetBox < 3.6 called the field device_role."""
+    for key in ("role", "device_role"):
+        value = device.get(key)
+        if isinstance(value, dict):
+            slug = str(value.get("slug", "")).strip()
+            name = str(value.get("name") or value.get("display") or "").strip()
+            if slug or name:
+                return slug, name
+    return "", ""
 
 
 def _extract_device_role_variants(device: dict) -> set[str]:
